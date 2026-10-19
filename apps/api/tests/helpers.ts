@@ -1,4 +1,5 @@
 import { sql } from 'drizzle-orm'
+import app from '../src/index'
 import { db } from '../src/db/client'
 
 if (!process.env.DATABASE_URL?.includes('test')) {
@@ -11,6 +12,13 @@ if (!process.env.DATABASE_URL?.includes('test')) {
 // needs them wrapped before it will recognize them as a promise.
 export function toPromise<T>(thenable: PromiseLike<T>): Promise<T> {
 	return Promise.resolve(thenable)
+}
+
+// biome-ignore lint: test helper, response shape varies per endpoint
+export async function getJson(path: string): Promise<{ status: number; body: any }> {
+	const res = await app.fetch(new Request(`http://localhost${path}`))
+	const body = await res.json()
+	return { status: res.status, body }
 }
 
 export async function resetDatabase() {

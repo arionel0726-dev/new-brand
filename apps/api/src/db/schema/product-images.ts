@@ -1,5 +1,13 @@
 import { sql } from 'drizzle-orm'
-import { check, index, integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core'
+import {
+	foreignKey,
+	index,
+	integer,
+	pgTable,
+	text,
+	timestamp,
+	uuid
+} from 'drizzle-orm/pg-core'
 import { productVariants } from './product-variants'
 import { products } from './products'
 
@@ -7,8 +15,12 @@ export const productImages = pgTable(
 	'product_images',
 	{
 		id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-		productId: uuid('product_id').references(() => products.id, { onDelete: 'cascade' }),
-		variantId: uuid('variant_id').references(() => productVariants.id, { onDelete: 'cascade' }),
+		// Always set: every image belongs to a product, optionally pinned to one
+		// of its variants via variantId below.
+		productId: uuid('product_id')
+			.notNull()
+			.references(() => products.id, { onDelete: 'cascade' }),
+		variantId: uuid('variant_id'),
 		url: text('url').notNull(),
 		altRu: text('alt_ru'),
 		altRo: text('alt_ro'),
@@ -18,9 +30,14 @@ export const productImages = pgTable(
 	table => [
 		index('product_images_product_id_idx').on(table.productId),
 		index('product_images_variant_id_idx').on(table.variantId),
-		check(
-			'product_images_owner_check',
-			sql`${table.productId} is not null or ${table.variantId} is not null`
-		)
+		// Composite FK (instead of a plain FK on variantId) so the database rejects
+		// an image whose variantId belongs to a different product than productId.
+		// With the default MATCH SIMPLE, a null variantId skips this check entirely,
+		// which is what product-level (non-variant) images need.
+		foreignKey({
+			columns: [table.variantId, table.productId],
+			foreignColumns: [productVariants.id, productVariants.productId],
+			name: 'product_images_variant_product_fk'
+		}).onDelete('cascade')
 	]
 )

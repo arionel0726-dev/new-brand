@@ -1,6 +1,7 @@
-export type ApiSuccess<T> = {
+export type ApiSuccess<T, M = undefined> = {
 	success: true
 	data: T
+	meta?: M
 }
 
 export type ApiError = {
@@ -8,7 +9,8 @@ export type ApiError = {
 	error: {
 		message: string
 		code: string
+		details?: unknown
 	}
 }
 
-export type ApiResponse<T> = ApiSuccess<T> | ApiError
+export type ApiResponse<T, M = undefined> = ApiSuccess<T, M> | ApiError

@@ -228,32 +228,60 @@ describe('foreign key behavior', () => {
 		).rejects.toThrow()
 	})
 
-	test('deleting a parent category sets children parent_id to null', async () => {
+	test('cannot delete a parent category while it still has children (RESTRICT)', async () => {
 		const [parent] = await db
 			.insert(categories)
 			.values({ slug: 'parent-2', nameRu: 'Родитель 2', nameRo: 'Părinte 2' })
 			.returning()
 
-		const [child] = await db
+		await db
 			.insert(categories)
 			.values({ slug: 'child-2', parentId: parent.id, nameRu: 'Ребёнок 2', nameRo: 'Copil 2' })
 			.returning()
 
-		await db.delete(categories).where(eq(categories.id, parent.id))
-
-		const [reloadedChild] = await db
-			.select()
-			.from(categories)
-			.where(eq(categories.id, child.id))
-
-		expect(reloadedChild.parentId).toBeNull()
+		await expect(
+			toPromise(db.delete(categories).where(eq(categories.id, parent.id)))
+		).rejects.toThrow()
 	})
 
-	test('an image must belong to a product or a variant', async () => {
+	test('every image must belong to a product', async () => {
 		const { productImages } = await import('../src/db/schema/product-images')
 
 		await expect(
-			toPromise(db.insert(productImages).values({ url: 'https://example.com/image.jpg' }))
+			toPromise(
+				db.insert(productImages).values({ url: 'https://example.com/image.jpg' } as never)
+			)
+		).rejects.toThrow()
+	})
+
+	test('an image cannot reference a variant belonging to a different product', async () => {
+		const { productImages } = await import('../src/db/schema/product-images')
+
+		const brand = await createBrand()
+		const productA = await createProduct(brand.id)
+		const [productB] = await db
+			.insert(products)
+			.values({
+				brandId: brand.id,
+				slug: 'test-product-b',
+				nameRu: 'Товар Б',
+				nameRo: 'Produs B'
+			})
+			.returning()
+
+		const [variantOfA] = await db
+			.insert(productVariants)
+			.values({ productId: productA.id, sku: 'SKU-CROSS-CHECK' })
+			.returning()
+
+		await expect(
+			toPromise(
+				db.insert(productImages).values({
+					productId: productB.id,
+					variantId: variantOfA.id,
+					url: 'https://example.com/cross.jpg'
+				})
+			)
 		).rejects.toThrow()
 	})
 })

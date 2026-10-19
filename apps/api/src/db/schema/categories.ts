@@ -5,8 +5,11 @@ export const categories = pgTable(
 	'categories',
 	{
 		id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+		// RESTRICT (not SET NULL/CASCADE): deleting a category that still has
+		// children must fail explicitly rather than silently promoting them to
+		// the root of the tree or deleting them.
 		parentId: uuid('parent_id').references((): AnyPgColumn => categories.id, {
-			onDelete: 'set null'
+			onDelete: 'restrict'
 		}),
 		slug: text('slug').notNull().unique(),
 		nameRu: text('name_ru').notNull(),

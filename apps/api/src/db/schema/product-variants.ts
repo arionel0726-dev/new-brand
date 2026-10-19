@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { index, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core'
+import { index, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core'
 import { products } from './products'
 
 export const productVariants = pgTable(
@@ -15,5 +15,10 @@ export const productVariants = pgTable(
 		createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 		updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
 	},
-	table => [index('product_variants_product_id_idx').on(table.productId)]
+	table => [
+		index('product_variants_product_id_idx').on(table.productId),
+		// Referenced by product_images' composite FK so a variant's image can be
+		// pinned to its real owning product at the database level.
+		unique('product_variants_id_product_id_unique').on(table.id, table.productId)
+	]
 )
