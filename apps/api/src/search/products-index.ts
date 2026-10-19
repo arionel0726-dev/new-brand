@@ -1,3 +1,4 @@
+import type { ProductListRow } from '../db/queries/products'
 import { searchClient } from './client'
 
 export const PRODUCTS_INDEX = 'products'
@@ -27,6 +28,36 @@ export type ProductSearchDocument = {
 
 export function getProductsIndex() {
 	return searchClient.index<ProductSearchDocument>(PRODUCTS_INDEX)
+}
+
+/** The single mapping from a publishable product row to its search document - shared by the full reindex and the single-product sync service so they can never drift apart. */
+export function toSearchDocument(
+	row: ProductListRow,
+	categories: { id: string; slug: string; nameRu: string; nameRo: string }[],
+	skus: string[]
+): ProductSearchDocument {
+	return {
+		id: row.id,
+		slug: row.slug,
+		nameRu: row.nameRu,
+		nameRo: row.nameRo,
+		descriptionRu: row.descriptionRu,
+		descriptionRo: row.descriptionRo,
+		brandId: row.brandId,
+		brandSlug: row.brandSlug,
+		brandNameRu: row.brandNameRu,
+		brandNameRo: row.brandNameRo,
+		categoryIds: categories.map(category => category.id),
+		categorySlugs: categories.map(category => category.slug),
+		categoryNamesRu: categories.map(category => category.nameRu),
+		categoryNamesRo: categories.map(category => category.nameRo),
+		skus,
+		minPrice: row.minPrice,
+		maxPrice: row.maxPrice,
+		currency: row.currency,
+		inStock: row.inStock,
+		createdAtTimestamp: new Date(row.createdAt).getTime()
+	}
 }
 
 /** Idempotent: safe to call on every reindex run and on server startup. */

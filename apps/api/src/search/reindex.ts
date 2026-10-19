@@ -1,8 +1,7 @@
 import {
 	fetchCategoriesForProducts,
 	fetchSkusForProducts,
-	listAllActiveProductsForIndexing,
-	type ProductListRow
+	listAllActiveProductsForIndexing
 } from '../db/queries/products'
 import { queryClient } from '../db/client'
 import {
@@ -10,37 +9,8 @@ import {
 	fetchAllIndexedProductIds,
 	indexProducts,
 	removeProductsFromIndex,
-	type ProductSearchDocument
+	toSearchDocument
 } from './products-index'
-
-function toSearchDocument(
-	row: ProductListRow,
-	categories: { id: string; slug: string; nameRu: string; nameRo: string }[],
-	skus: string[]
-): ProductSearchDocument {
-	return {
-		id: row.id,
-		slug: row.slug,
-		nameRu: row.nameRu,
-		nameRo: row.nameRo,
-		descriptionRu: row.descriptionRu,
-		descriptionRo: row.descriptionRo,
-		brandId: row.brandId,
-		brandSlug: row.brandSlug,
-		brandNameRu: row.brandNameRu,
-		brandNameRo: row.brandNameRo,
-		categoryIds: categories.map(category => category.id),
-		categorySlugs: categories.map(category => category.slug),
-		categoryNamesRu: categories.map(category => category.nameRu),
-		categoryNamesRo: categories.map(category => category.nameRo),
-		skus,
-		minPrice: row.minPrice,
-		maxPrice: row.maxPrice,
-		currency: row.currency,
-		inStock: row.inStock,
-		createdAtTimestamp: new Date(row.createdAt).getTime()
-	}
-}
 
 /**
  * Full catalog reindex: PostgreSQL is the source of truth, Meilisearch only

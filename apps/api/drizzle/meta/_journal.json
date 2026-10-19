@@ -15,6 +15,13 @@
       "when": 1792429070719,
       "tag": "0001_outstanding_the_renegades",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792433640884,
+      "tag": "0002_slim_scarlet_witch",
+      "breakpoints": true
     }
   ]
 }

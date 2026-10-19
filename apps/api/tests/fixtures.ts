@@ -12,7 +12,8 @@ import { products } from '../src/db/schema/products'
  * A small, realistic catalog used across Sprint 2 API tests:
  * - 2 brands (one with only unpublished products, to test exclusion)
  * - 3 categories, nested (skincare > face), plus an unrelated one (makeup)
- * - 1 active product with 2 priced/stocked variants + 1 unpriced ("inactive") variant
+ * - 1 active product with 2 sellable variants, 1 unpriced variant, and 1
+ *   priced+stocked but explicitly isActive=false variant
  * - 1 draft and 1 archived product, which must never surface publicly
  */
 export async function seedCatalog() {
@@ -103,6 +104,13 @@ export async function seedCatalog() {
 		.values({ productId: cream.id, sku: 'REV-NOPRICE' })
 		.returning()
 
+	// Priced AND stocked, but explicitly switched off - must never surface
+	// publicly even though pricing/stock alone would make it sellable.
+	const [vInactive] = await db
+		.insert(productVariants)
+		.values({ productId: cream.id, sku: 'REV-DISCONTINUED', isActive: false })
+		.returning()
+
 	const [serumVariant] = await db
 		.insert(productVariants)
 		.values({ productId: serum.id, sku: 'SER-30' })
@@ -111,12 +119,14 @@ export async function seedCatalog() {
 	await db.insert(productPrices).values([
 		{ variantId: v50.id, price: 15000, compareAtPrice: 18000 },
 		{ variantId: v100.id, price: 25000 },
+		{ variantId: vInactive.id, price: 12000 },
 		{ variantId: serumVariant.id, price: 40000 }
 	])
 
 	await db.insert(inventory).values([
 		{ variantId: v50.id, quantity: 10 },
 		{ variantId: v100.id, quantity: 0 },
+		{ variantId: vInactive.id, quantity: 50 },
 		{ variantId: serumVariant.id, quantity: 5 }
 	])
 
@@ -130,6 +140,6 @@ export async function seedCatalog() {
 		brands: { brandA, brandB },
 		categories: { skincare, face, makeup },
 		products: { cream, serum, draftProduct, archivedProduct },
-		variants: { v50, v100, vNoPrice, serumVariant }
+		variants: { v50, v100, vNoPrice, vInactive, serumVariant }
 	}
 }

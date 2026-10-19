@@ -14,6 +14,7 @@ import type { Pagination } from '../../lib/pagination'
 export type ProductSort = 'price_asc' | 'price_desc' | 'newest' | 'name_asc' | 'name_desc'
 
 export type ProductListFilters = {
+	productId?: string
 	brandSlug?: string
 	categoryIds?: string[]
 	minPrice?: number
@@ -21,10 +22,13 @@ export type ProductListFilters = {
 	inStock?: boolean
 }
 
-// A variant only counts as sellable/"published" once it has a price row -
-// without one there is nothing to charge, so it should not surface (or drive
-// price/stock aggregates) in the public catalog. See Sprint 2 notes for why
-// this reading was used instead of adding a dedicated is_active column.
+// A variant only counts as sellable/"published" once it is active AND has a
+// price row - without a price there is nothing to charge, so it should not
+// surface (or drive price/stock aggregates) in the public catalog. isActive
+// and having a price are independent: a priced variant can still be switched
+// off, and a newly created active variant may not be priced yet.
+const PUBLISHED_VARIANT_CONDITION = eq(productVariants.isActive, true)
+
 const priceAggregate = db
 	.select({
 		productId: productVariants.productId,
@@ -36,11 +40,16 @@ const priceAggregate = db
 	.from(productVariants)
 	.innerJoin(productPrices, eq(productPrices.variantId, productVariants.id))
 	.leftJoin(inventory, eq(inventory.variantId, productVariants.id))
+	.where(PUBLISHED_VARIANT_CONDITION)
 	.groupBy(productVariants.productId)
 	.as('price_aggregate')
 
 function buildFilters(filters: ProductListFilters): SQL[] {
 	const conditions: SQL[] = [eq(products.status, 'active')]
+
+	if (filters.productId) {
+		conditions.push(eq(products.id, filters.productId))
+	}
 
 	if (filters.brandSlug) {
 		conditions.push(eq(brands.slug, filters.brandSlug))
@@ -148,14 +157,28 @@ export async function listAllActiveProductsForIndexing(): Promise<ProductListRow
 	return baseListQuery({}).orderBy(asc(products.id))
 }
 
-/** Batch-fetch variant SKUs for a set of product ids in a single query (no N+1). */
+/**
+ * A single product's publishable row (active status + at least one published
+ * variant), or null when it is missing, draft/archived, or has no published
+ * variant left - the three cases the search sync service must treat as
+ * "remove from the index" rather than "index this".
+ */
+export async function getPublishableProductRowById(
+	productId: string
+): Promise<ProductListRow | null> {
+	const [row] = await baseListQuery({ productId }).limit(1)
+	return row ?? null
+}
+
+/** Batch-fetch published (active + priced) variant SKUs for a set of product ids in a single query (no N+1). */
 export async function fetchSkusForProducts(productIds: string[]) {
 	if (productIds.length === 0) return new Map<string, string[]>()
 
 	const rows = await db
 		.select({ productId: productVariants.productId, sku: productVariants.sku })
 		.from(productVariants)
-		.where(inArray(productVariants.productId, productIds))
+		.innerJoin(productPrices, eq(productPrices.variantId, productVariants.id))
+		.where(and(inArray(productVariants.productId, productIds), PUBLISHED_VARIANT_CONDITION))
 
 	const map = new Map<string, string[]>()
 	for (const row of rows) {
@@ -265,7 +288,7 @@ export async function getProductBySlug(slug: string) {
 			.from(productVariants)
 			.innerJoin(productPrices, eq(productPrices.variantId, productVariants.id))
 			.leftJoin(inventory, eq(inventory.variantId, productVariants.id))
-			.where(eq(productVariants.productId, product.id)),
+			.where(and(eq(productVariants.productId, product.id), PUBLISHED_VARIANT_CONDITION)),
 		db
 			.select({
 				id: productImages.id,
@@ -279,6 +302,11 @@ export async function getProductBySlug(slug: string) {
 			.where(eq(productImages.productId, product.id))
 			.orderBy(asc(productImages.sortOrder))
 	])
+
+	// Consistent with the list endpoint (INNER JOINed on priceAggregate): a
+	// product with no published variant has nothing to sell and must not be
+	// publicly reachable either, even by direct slug lookup.
+	if (variantRows.length === 0) return null
 
 	return { product, categories: categoryRows, variants: variantRows, images: imageRows }
 }
