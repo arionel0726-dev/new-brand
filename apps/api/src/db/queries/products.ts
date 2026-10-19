@@ -35,7 +35,9 @@ const priceAggregate = db
 		minPrice: sql<number>`min(${productPrices.price})`.as('min_price'),
 		maxPrice: sql<number>`max(${productPrices.price})`.as('max_price'),
 		currency: sql<string>`min(${productPrices.currency})`.as('currency'),
-		inStock: sql<boolean>`bool_or(coalesce(${inventory.quantity}, 0) > 0)`.as('in_stock')
+		inStock: sql<boolean>`bool_or(coalesce(${inventory.quantityOnHand}, 0) - coalesce(${inventory.quantityReserved}, 0) > 0)`.as(
+			'in_stock'
+		)
 	})
 	.from(productVariants)
 	.innerJoin(productPrices, eq(productPrices.variantId, productVariants.id))
@@ -283,7 +285,7 @@ export async function getProductBySlug(slug: string) {
 				price: productPrices.price,
 				compareAtPrice: productPrices.compareAtPrice,
 				currency: productPrices.currency,
-				quantity: sql<number>`coalesce(${inventory.quantity}, 0)`
+				quantity: sql<number>`coalesce(${inventory.quantityOnHand}, 0) - coalesce(${inventory.quantityReserved}, 0)`
 			})
 			.from(productVariants)
 			.innerJoin(productPrices, eq(productPrices.variantId, productVariants.id))

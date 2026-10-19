@@ -94,7 +94,7 @@ describe('product_variants.is_active', () => {
 			.from(inventory)
 			.where(eq(inventory.variantId, variants.v100.id))
 		expect(price.price).toBe(25000)
-		expect(stock.quantity).toBe(0)
+		expect(stock.quantityOnHand).toBe(0)
 	})
 
 	test('a product with only inactive/unpriced variants disappears from the public catalog', async () => {

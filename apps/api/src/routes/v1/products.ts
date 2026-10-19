@@ -72,7 +72,7 @@ export const productsRoute = new Hono()
 
 		let categoryIds: string[] | undefined
 		if (query.category) {
-			const allCategories = await fetchAllCategories()
+			const allCategories = await fetchAllCategories({ activeOnly: true })
 			const match = allCategories.find(category => category.slug === query.category)
 			if (!match) {
 				return okWithMeta(c, [], buildPageMeta({ page: query.page, limit: query.limit }, 0))

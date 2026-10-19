@@ -1,6 +1,8 @@
-import { sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
+import { env } from '../src/config/env'
 import app from '../src/index'
 import { db } from '../src/db/client'
+import { user, type UserRole } from '../src/db/schema/auth'
 
 if (!process.env.DATABASE_URL?.includes('test')) {
 	throw new Error(
@@ -69,4 +71,31 @@ export async function resetAuthTables() {
 			"user"
 		restart identity cascade
 	`)
+}
+
+/**
+ * Signs up a fresh user and, for anything above 'customer', promotes them
+ * the same way the real server-side CLI script would (direct DB write -
+ * there is no HTTP endpoint for it, by design). Returns a Cookie header
+ * value ready to send on subsequent requests.
+ */
+export async function createSessionAs(
+	role: UserRole,
+	emailPrefix = role
+): Promise<{ cookie: string; email: string; userId: string }> {
+	const email = `${emailPrefix}-${crypto.randomUUID()}@example.com`
+	const signUpResult = await requestJson('/api/auth/sign-up/email', {
+		method: 'POST',
+		headers: { Origin: env.WEB_ORIGIN },
+		body: JSON.stringify({ email, password: 'password123', name: `Test ${role}` })
+	})
+
+	const cookie = extractCookieHeader(signUpResult.headers)
+	const userId = signUpResult.body.user.id as string
+
+	if (role !== 'customer') {
+		await db.update(user).set({ role }).where(eq(user.id, userId))
+	}
+
+	return { cookie, email, userId }
 }

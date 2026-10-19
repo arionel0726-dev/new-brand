@@ -88,11 +88,11 @@ describe.skipIf(!meiliAvailable)('search sync service (Meilisearch available)', 
 			.where(eq(productPrices.variantId, variants.v50.id))
 		await db
 			.update(inventory)
-			.set({ quantity: 0 })
+			.set({ quantityOnHand: 0 })
 			.where(eq(inventory.variantId, variants.v50.id))
 		await db
 			.update(inventory)
-			.set({ quantity: 0 })
+			.set({ quantityOnHand: 0 })
 			.where(eq(inventory.variantId, variants.v100.id))
 
 		await syncProductToIndex(seeded.cream.id)

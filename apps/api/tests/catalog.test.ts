@@ -60,7 +60,7 @@ describe('products with variants', () => {
 				price: 10000 + index * 5000,
 				compareAtPrice: 15000 + index * 5000
 			})
-			await db.insert(inventory).values({ variantId: variant.id, quantity: 20 + index })
+			await db.insert(inventory).values({ variantId: variant.id, quantityOnHand: 20 + index })
 		}
 
 		const storedVariants = await db
@@ -195,7 +195,7 @@ describe('price and inventory constraints', () => {
 			.returning()
 
 		await expect(
-			toPromise(db.insert(inventory).values({ variantId: variant.id, quantity: -1 }))
+			toPromise(db.insert(inventory).values({ variantId: variant.id, quantityOnHand: -1 }))
 		).rejects.toThrow()
 	})
 })

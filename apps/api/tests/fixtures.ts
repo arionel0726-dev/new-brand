@@ -124,10 +124,10 @@ export async function seedCatalog() {
 	])
 
 	await db.insert(inventory).values([
-		{ variantId: v50.id, quantity: 10 },
-		{ variantId: v100.id, quantity: 0 },
-		{ variantId: vInactive.id, quantity: 50 },
-		{ variantId: serumVariant.id, quantity: 5 }
+		{ variantId: v50.id, quantityOnHand: 10 },
+		{ variantId: v100.id, quantityOnHand: 0 },
+		{ variantId: vInactive.id, quantityOnHand: 50 },
+		{ variantId: serumVariant.id, quantityOnHand: 5 }
 	])
 
 	await db.insert(productImages).values([

@@ -41,13 +41,13 @@ function serializeTree(nodes: ReturnType<typeof buildCategoryTree>): unknown[] {
 
 export const categoriesRoute = new Hono()
 	.get('/', validateQuery(listQuerySchema), async c => {
-		const rows = await fetchAllCategories()
+		const rows = await fetchAllCategories({ activeOnly: true })
 		const tree = buildCategoryTree(rows)
 		return ok(c, serializeTree(tree))
 	})
 	.get('/:slug', async c => {
 		const slug = c.req.param('slug')
-		const rows = await fetchAllCategories()
+		const rows = await fetchAllCategories({ activeOnly: true })
 		const category = rows.find(row => row.slug === slug)
 
 		if (!category) {

@@ -1,4 +1,4 @@
-import { asc } from 'drizzle-orm'
+import { asc, eq } from 'drizzle-orm'
 import { db } from '../client'
 import { categories } from '../schema/categories'
 
@@ -10,8 +10,18 @@ export type CategoryNode = CategoryRow & { children: CategoryNode[] }
 // general-purpose CMS taxonomy) that fetching it flat once and assembling the
 // tree/descendant lookups in memory is simpler and just as correct as a
 // recursive SQL CTE, without the extra query complexity.
-export async function fetchAllCategories(): Promise<CategoryRow[]> {
-	return db.select().from(categories).orderBy(asc(categories.nameRu))
+//
+// `activeOnly` lets the public API show only isActive categories while the
+// admin API (which needs to list/edit disabled ones too) omits it. Filtering
+// here, before buildCategoryTree/collectDescendantIds ever see the rows,
+// is enough: an inactive category's still-active children are simply
+// orphaned to the root rather than appearing under a hidden parent.
+export async function fetchAllCategories(options: { activeOnly?: boolean } = {}): Promise<CategoryRow[]> {
+	const query = db.select().from(categories).orderBy(asc(categories.sortOrder), asc(categories.nameRu))
+	if (options.activeOnly) {
+		return query.where(eq(categories.isActive, true))
+	}
+	return query
 }
 
 export function buildCategoryTree(rows: CategoryRow[]): CategoryNode[] {
