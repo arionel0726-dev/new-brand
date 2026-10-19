@@ -1,0 +1,47 @@
+name: beauty-store
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: beauty-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.15
+    container_name: beauty-meilisearch
+    restart: unless-stopped
+    environment:
+      MEILI_ENV: development
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+      MEILI_NO_ANALYTICS: 'true'
+    ports:
+      - '127.0.0.1:7700:7700'
+    volumes:
+      - meili_data:/meili_data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          curl --fail --silent http://localhost:7700/health > /dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  meili_data:
