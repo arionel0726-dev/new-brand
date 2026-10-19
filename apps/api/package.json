@@ -5,10 +5,12 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/db/migrate.ts",
     "search:reindex": "bun run src/search/reindex.ts",
+    "auth:set-role": "bun run src/auth/set-role.ts",
     "test": "bun test"
   },
   "dependencies": {
     "@hono/zod-validator": "^0.9.1",
+    "better-auth": "^1.7.11",
     "dotenv": "^18.0.8",
     "drizzle-orm": "^0.45.4",
     "hono": "^4.13.13",
