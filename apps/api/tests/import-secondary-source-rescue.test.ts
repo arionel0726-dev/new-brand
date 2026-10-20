@@ -9,6 +9,7 @@ function result(overrides: Partial<MysqlReconciliationResult> & { legacyProductI
 		basis: [],
 		matchedOneCIdNoms: [],
 		reasoning: 'synthetic',
+		possiblyDiscontinued: false,
 		...overrides
 	}
 }

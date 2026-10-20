@@ -1,5 +1,6 @@
 /**
- * Duplicate-`ID_nom` classification (Sprint 12A.4 Task 4).
+ * Duplicate-`ID_nom` classification (Sprint 12A.4 Task 4, refined in
+ * Sprint 12A.5 Tasks 1 & 6 against the real reconciliation run's findings).
  *
  * Sprint 12A.3's own aggregate audit (`docs/legacy-audit/vizaje-1c-audit.md`)
  * found that `ID_nom` - the field every prior sprint (10A/10A.1/12A.2)
@@ -7,36 +8,67 @@
  * 1C feed itself*: 771 groups / 1594 rows in `products.json` alone, plus
  * smaller rates in `pricevn.json`, `JobVN.json`, and `old_products.json`.
  * That finding only says *how many* rows collide on `ID_nom`; it says
- * nothing about *why*. This module answers "why", deterministically, once
- * real row-level records are available (today it is exercised only
- * against synthetic fixtures - see the accompanying test file).
+ * nothing about *why*. This module answers "why", deterministically.
  *
- * Four possible explanations per duplicate group, decided in this strict
- * priority order (most conservative first - a genuine identity conflict
- * always wins over a more benign explanation, even if some fields would
- * also qualify as "just mutable" or "just a variant marker"):
+ * Sprint 12A.5's real run against the actual files reported 768/771
+ * `products.json` groups as `conflicting` and 0 as `variant_or_warehouse`.
+ * Reading this module's Sprint 12A.4 logic explains why: `Barcode` was
+ * classified as an ordinary "unrecognized" field, so *any* group whose
+ * records differ in `Barcode` - which, per the real audit, is the
+ * overwhelmingly common case since `Barcode` is 99.9% distinct across the
+ * feed - fell straight into `conflicting`, indistinguishable from a group
+ * that differs in `Brand` or `NomenclatureCategory*`. That is a real
+ * classification gap, not a report formatting issue: a barcode-only
+ * difference under one `ID_nom` is very plausibly a multi-pack or
+ * variant-level barcode, which is a materially different situation from a
+ * brand/category/title conflict, and deserves its own bucket so a human
+ * reviewer doesn't have to re-derive "oh, this 'conflict' is just a
+ * barcode" by hand for every one of 768 groups. The same real run also
+ * reported pricevn.json groups differing only in `Price`/`DiscountPrice`
+ * being silently folded into the same soft `mutable_only` bucket as
+ * `QuantityBalance`/`PriceWH` - the user's Task 6 explicitly requires a
+ * price disagreement between two rows sharing one `ID_nom` to be
+ * surfaced as its own, more serious category, never silently averaged,
+ * first-picked, or last-picked (no code anywhere in this project
+ * currently selects a price at all - see `docs/vizaje-1c-reconciliation-
+ * plan.md` §8 for the full finding - but this classifier is the layer
+ * that must make a future price-selection feature's job safe by refusing
+ * to call a real price disagreement "benign").
  *
- *   1. `identical`         - every field matches across all rows. A
- *      harmless repeated-row export artifact.
- *   2. `conflicting`       - at least one field outside the recognized
- *      "mutable" and "variant/warehouse marker" sets differs (e.g. `Brand`,
- *      `VariativeName`, a title/description field, `Sex`, `Barcode`,
- *      a `NomenclatureCategory*` field). This is the dangerous case: two
- *      materially different records sharing one `ID_nom`.
- *   3. `variant_or_warehouse` - every differing field is a recognized
- *      variant-attribute marker (`ColorVar`, `ColorVarMD`, `VolumeVar`) or
- *      a per-warehouse stock column (`Bal*`, e.g. `BalMall`, `BalUNIC`).
- *      This is a *candidate* finding, not a proven one: it suggests the
- *      "duplicate" rows may actually be encoding distinct variant or
- *      per-warehouse dimensions under one shared `ID_nom`, which a human
- *      reviewer should treat as informative, never as license to silently
- *      merge or split records automatically.
- *   4. `mutable_only`      - every differing field is a known mutable
- *      field (`Price`, `PriceWH`, `QuantityBalance`, `DiscountPrice`).
- *      Plausibly a re-export/snapshot of the same record at two different
- *      times, not a true conflict - but still surfaced, never silently
- *      collapsed, since this project's price/stock fields are explicitly
- *      out of scope for any automated resolution this sprint.
+ * Five possible explanations per duplicate group, decided in this strict
+ * priority order (most conservative/dangerous first - a field in an
+ * earlier tier always wins over a later one, even when some other
+ * differing field in the same group would also qualify for a later tier):
+ *
+ *   1. `conflicting`         - at least one field outside every other
+ *      recognized set below differs (e.g. `Brand`, `VariativeName`, a
+ *      title/description field, `Sex`, a `NomenclatureCategory*` field).
+ *      This is the dangerous case: two materially different records
+ *      sharing one `ID_nom`.
+ *   2. `price_conflict`      - (and nothing from tier 1 differs) `Price`
+ *      and/or `DiscountPrice` differ. A real, actionable pricing
+ *      disagreement between two rows claiming the same `ID_nom` - always
+ *      surfaced for human resolution, never silently resolved by picking
+ *      either value.
+ *   3. `barcode_only_conflict` - (and nothing from tiers 1-2 differs)
+ *      only `Barcode` differs. A distinct, less severe signal than a
+ *      general conflict: plausibly a multi-pack/variant-level barcode
+ *      under one `ID_nom`, but still never auto-merged or treated as
+ *      proof of anything - a human decides.
+ *   4. `variant_or_warehouse` - (and nothing from tiers 1-3 differs)
+ *      every remaining differing field is a recognized variant-attribute
+ *      marker (`ColorVar`, `ColorVarMD`, `VolumeVar`) or a per-warehouse
+ *      stock column (`Bal*`, e.g. `BalMall`, `BalUNIC`). A *candidate*
+ *      finding, not a proven one: it suggests the "duplicate" rows may
+ *      actually be encoding distinct variant or per-warehouse dimensions
+ *      under one shared `ID_nom`.
+ *   5. `mutable_only`        - every differing field is a *soft* mutable
+ *      field (`PriceWH`, `QuantityBalance`) - fields that legitimately
+ *      fluctuate across re-exports/snapshots without indicating any real
+ *      conflict. Still surfaced, never silently collapsed.
+ *
+ *   `identical` (no priority tier - checked first) - every field matches
+ *   across all rows. A harmless repeated-row export artifact.
  *
  * This module never compares, merges, or discards records - it only
  * labels a group and lists *which field names* differ (never the field
@@ -44,7 +76,13 @@
  * here even though this module's own test fixtures are synthetic).
  */
 
-export type IdNomDuplicateClassification = 'identical' | 'conflicting' | 'mutable_only' | 'variant_or_warehouse'
+export type IdNomDuplicateClassification =
+	| 'identical'
+	| 'conflicting'
+	| 'price_conflict'
+	| 'barcode_only_conflict'
+	| 'mutable_only'
+	| 'variant_or_warehouse'
 
 export type IdNomDuplicateGroup = {
 	idNom: string
@@ -65,8 +103,18 @@ export type IdNomDuplicateReport = {
 
 const EXAMPLE_LIMIT = 3
 
-/** Price/stock fields known to be legitimately mutable across re-exports of the same logical row. */
-const MUTABLE_FIELDS = new Set(['Price', 'PriceWH', 'QuantityBalance', 'DiscountPrice'])
+/**
+ * Real price fields (Sprint 12A.5 Task 6) - a difference here is a genuine
+ * pricing disagreement, never folded into the softer `mutable_only`
+ * bucket and never silently resolved by any downstream code.
+ */
+const PRICE_FIELDS = new Set(['Price', 'DiscountPrice'])
+
+/** Soft mutable fields: legitimately fluctuate across re-exports/snapshots of the same logical row without indicating a real conflict. */
+const SOFT_MUTABLE_FIELDS = new Set(['PriceWH', 'QuantityBalance'])
+
+/** Physical/supplier identifier - a difference here (Sprint 12A.5 Task 1) is its own, less severe signal than a general field conflict, never treated as proof of anything on its own. */
+const BARCODE_FIELD = new Set(['Barcode'])
 
 /** Variant-attribute markers - a difference here suggests distinct variants sharing one ID_nom, not a conflict. */
 const VARIANT_MARKER_FIELDS = new Set(['ColorVar', 'ColorVarMD', 'VolumeVar'])
@@ -105,16 +153,47 @@ export function classifyIdNomDuplicateGroup(idNom: string, records: Record<strin
 		}
 	}
 
-	const conflictingFields = differingFields.filter(
-		f => !MUTABLE_FIELDS.has(f) && !VARIANT_MARKER_FIELDS.has(f) && !WAREHOUSE_STOCK_FIELD_PATTERN.test(f)
-	)
+	const isRecognized = (f: string) =>
+		PRICE_FIELDS.has(f) || SOFT_MUTABLE_FIELDS.has(f) || BARCODE_FIELD.has(f) || VARIANT_MARKER_FIELDS.has(f) || WAREHOUSE_STOCK_FIELD_PATTERN.test(f)
+
+	// Tier 1: anything not recognized by a later, more specific tier is a
+	// genuine conflict - always wins, even if some other differing field in
+	// the same group would also qualify for a later tier.
+	const conflictingFields = differingFields.filter(f => !isRecognized(f))
 	if (conflictingFields.length > 0) {
 		return {
 			idNom,
 			recordCount: records.length,
 			classification: 'conflicting',
 			differingFields,
-			note: `conflicts on field(s) outside the recognized mutable/variant sets: ${conflictingFields.join(', ')} - needs human review, never auto-resolved`
+			note: `conflicts on field(s) outside every recognized set: ${conflictingFields.join(', ')} - needs human review, never auto-resolved`
+		}
+	}
+
+	// Tier 2: a real price disagreement - always its own category, never
+	// folded into the softer mutable_only bucket (Sprint 12A.5 Task 6).
+	const priceFields = differingFields.filter(f => PRICE_FIELDS.has(f))
+	if (priceFields.length > 0) {
+		return {
+			idNom,
+			recordCount: records.length,
+			classification: 'price_conflict',
+			differingFields,
+			note: `price field(s) disagree between records sharing this ID_nom: ${priceFields.join(', ')} - a real pricing conflict requiring human resolution, never silently resolved by picking either value`
+		}
+	}
+
+	// Tier 3: barcode-only difference - distinct from a general conflict
+	// (Sprint 12A.5 Task 1): plausibly a multi-pack/variant-level barcode
+	// under one ID_nom, never treated as proof on its own.
+	const barcodeFields = differingFields.filter(f => BARCODE_FIELD.has(f))
+	if (barcodeFields.length > 0) {
+		return {
+			idNom,
+			recordCount: records.length,
+			classification: 'barcode_only_conflict',
+			differingFields,
+			note: 'only Barcode differs between records sharing this ID_nom - may legitimately represent multiple barcodes/packs/variant-level records, but is never auto-merged; needs human review'
 		}
 	}
 
@@ -134,7 +213,7 @@ export function classifyIdNomDuplicateGroup(idNom: string, records: Record<strin
 		recordCount: records.length,
 		classification: 'mutable_only',
 		differingFields,
-		note: `differs only in known-mutable field(s): ${differingFields.join(', ')} - plausibly a re-export/snapshot at a different time, not a true conflict`
+		note: `differs only in soft-mutable field(s): ${differingFields.join(', ')} - plausibly a re-export/snapshot at a different time, not a true conflict`
 	}
 }
 
@@ -162,18 +241,20 @@ export function classifyIdNomDuplicates(rawRecords: Record<string, unknown>[], i
 		classifiedGroups.push(classifyIdNomDuplicateGroup(idNom, records))
 	}
 
-	const byClassification: Record<IdNomDuplicateClassification, number> = {
-		identical: 0,
-		conflicting: 0,
-		mutable_only: 0,
-		variant_or_warehouse: 0
-	}
-	const exampleBuckets: Record<IdNomDuplicateClassification, IdNomDuplicateGroup[]> = {
-		identical: [],
-		conflicting: [],
-		mutable_only: [],
-		variant_or_warehouse: []
-	}
+	const ALL_CLASSIFICATIONS: IdNomDuplicateClassification[] = [
+		'identical',
+		'conflicting',
+		'price_conflict',
+		'barcode_only_conflict',
+		'variant_or_warehouse',
+		'mutable_only'
+	]
+
+	const byClassification = Object.fromEntries(ALL_CLASSIFICATIONS.map(c => [c, 0])) as Record<IdNomDuplicateClassification, number>
+	const exampleBuckets = Object.fromEntries(ALL_CLASSIFICATIONS.map(c => [c, [] as IdNomDuplicateGroup[]])) as Record<
+		IdNomDuplicateClassification,
+		IdNomDuplicateGroup[]
+	>
 	for (const group of classifiedGroups) {
 		byClassification[group.classification]++
 		if (exampleBuckets[group.classification].length < EXAMPLE_LIMIT) exampleBuckets[group.classification].push(group)
@@ -185,11 +266,6 @@ export function classifyIdNomDuplicates(rawRecords: Record<string, unknown>[], i
 		totalGroups: classifiedGroups.length,
 		byClassification,
 		groups: classifiedGroups,
-		examples: {
-			identical: exampleBuckets.identical.map(toExample),
-			conflicting: exampleBuckets.conflicting.map(toExample),
-			mutable_only: exampleBuckets.mutable_only.map(toExample),
-			variant_or_warehouse: exampleBuckets.variant_or_warehouse.map(toExample)
-		}
+		examples: Object.fromEntries(ALL_CLASSIFICATIONS.map(c => [c, exampleBuckets[c].map(toExample)])) as IdNomDuplicateReport['examples']
 	}
 }

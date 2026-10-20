@@ -62,6 +62,21 @@ export type MatchBasisEntry = {
 
 export type ReconciliationOutcome = 'confirmed' | 'ambiguous' | 'unmatched' | 'quarantine'
 
+/**
+ * Sprint 12A.5 Task 4's taxonomy of every distinct code path that produces
+ * an `'ambiguous'` outcome in `matchProduct` below:
+ *   - `conflicting_candidates`: two or more *different* ID_nom values were
+ *     found as candidates across the available keys (e.g. GUID points at
+ *     one 1C record, Barcode points at a different one) - a genuine
+ *     cross-key disagreement.
+ *   - `duplicate_1c_records_on_single_key`: exactly one candidate ID_nom
+ *     was found, but a single key (GUID, barcode, or the group-code) hit
+ *     more than one 1C record sharing that same value - i.e. the 1C input
+ *     itself has a duplicate on that key (consistent with the real
+ *     ID_nom-duplicate-within-1C finding from Sprint 12A.3/12A.5).
+ */
+export type AmbiguityReasonCode = 'conflicting_candidates' | 'duplicate_1c_records_on_single_key'
+
 export type MysqlReconciliationResult = {
 	legacyProductId: number
 	mysqlGuid: string | null
@@ -70,6 +85,19 @@ export type MysqlReconciliationResult = {
 	basis: MatchBasisEntry[]
 	matchedOneCIdNoms: string[]
 	reasoning: string
+	/**
+	 * Reflects the *raw* 1C-matching attempt before any prior-quarantine
+	 * override (Sprint 12A.5 Task 2) - set whenever that raw attempt was
+	 * `'confirmed'`, listing which key(s) agreed on the single resulting
+	 * ID_nom. Like `reasoning`, this is never erased when `outcome` ends up
+	 * `'quarantine'` instead - it stays attached as context for whoever
+	 * resolves the quarantine.
+	 */
+	confirmedKeys?: ReconciliationMatchKey[]
+	/** Raw-match-attempt field, same quarantine-never-erases-evidence rule as `confirmedKeys` above - set whenever the raw attempt was `'ambiguous'`. See `AmbiguityReasonCode` (Sprint 12A.5 Task 4). */
+	ambiguityReasonCode?: AmbiguityReasonCode
+	/** Raw-match-attempt field, same rule - `true` only when the raw attempt was `'unmatched'` AND real MySQL-side evidence (today: `isShown === false`) was found (Sprint 12A.5 Task 5). `false` whenever the raw attempt was not `'unmatched'` (confirmed/ambiguous never set this true), but - like `confirmedKeys`/`ambiguityReasonCode` - preserved as attached evidence even when the final `outcome` is overridden to `'quarantine'`. */
+	possiblyDiscontinued: boolean
 	/**
 	 * Carried over verbatim from the Sprint 12A.2 catalog dry-run when this
 	 * product was already quarantined there. Reconciliation against 1C never
@@ -95,7 +123,40 @@ export type ReconciliationSummary = {
 	unmatched: number
 	quarantine: number
 	unmatchedOneCRecordCount: number
-	byMatchKey: Record<ReconciliationMatchKey, number>
+	/**
+	 * Sprint 12A.5 Task 2: the real run's `byMatchKey` sums to far more than
+	 * `totalMysqlProducts` (e.g. 56684 barcode "matches" against 6999
+	 * products) because this counts every *candidate signal* - one entry
+	 * per `basis` push in `matchProduct`, so a single MySQL product
+	 * contributes multiple entries whenever a key hits more than one 1C
+	 * record (most commonly: a duplicate value on the 1C side for that
+	 * key - consistent with the ID_nom-duplicate-within-1C finding). This
+	 * is never "N products matched via key K" - use
+	 * `byMatchKeyConfirmedEntities` for that question instead.
+	 */
+	byMatchKeyCandidates: Record<ReconciliationMatchKey, number>
+	/**
+	 * Sprint 12A.5 Task 2: one count per key, per `confirmed`-outcome MySQL
+	 * product, for every key that contributed to that product's single
+	 * unambiguous match (a confirmed product can count under more than one
+	 * key when multiple keys agreed on the same ID_nom). Sums to at most
+	 * `confirmed` × (number of match keys), and is the number to read when
+	 * asking "how many actually-confirmed entities relied on key K".
+	 */
+	byMatchKeyConfirmedEntities: Record<ReconciliationMatchKey, number>
+	ambiguousByReasonCode: Record<AmbiguityReasonCode, number>
+	/**
+	 * Count of products whose *raw* 1C-matching attempt was `unmatched` AND
+	 * carried real MySQL-side evidence (today: `isShown === false`)
+	 * suggesting a possible discontinuation. A strict subset of raw-unmatched
+	 * products, never equal to `unmatched` above unless every one happened
+	 * to carry that evidence - and, consistent with `byMatchKeyCandidates`/
+	 * `ambiguousByReasonCode`, this counts the raw attempt even for a
+	 * product a prior quarantine later overrode to `'quarantine'` (the
+	 * evidence is attached context for resolving that quarantine, not
+	 * erased by it).
+	 */
+	possiblyDiscontinuedCount: number
 	examples: Record<ReconciliationOutcome, { legacyProductId: number; note: string }[]>
 }
 
@@ -120,6 +181,28 @@ const GROUP_CODE_PATTERN = /^[a-z]{0,3}\d+[a-z]*\.[a-z0-9.]+$/i
 function detectGroupCode(sku: string | null): string | null {
 	if (sku === null) return null
 	return GROUP_CODE_PATTERN.test(sku) ? sku : null
+}
+
+/**
+ * Sprint 12A.5 Task 3 finding: the real reconciliation run reported ZERO
+ * `variative_nomenclature_group` matches despite 1536 distinct 1C
+ * `VariativeNomenclature` values observed in the real audit - a code-level
+ * review found the actual cause. `detectGroupCode`'s regex test is
+ * case-insensitive (the `/i` flag only governs whether a SKU *looks like*
+ * a group code), but the Map lookups that join the MySQL-side group-code
+ * index (`groupCodeOwners`, keyed by `products.SKU`) against the 1C-side
+ * `variativeIndex` (keyed by `VariativeNomenclature`) previously used the
+ * raw, un-normalized string as the Map key - and JS `Map` keys are
+ * case-sensitive. A MySQL SKU of `"a10.xxx"` and a 1C `VariativeNomenclature`
+ * of `"A10.XXX"` represent the same group semantically (Sprint 12A.2 §13.3)
+ * but would never collide as Map keys. This normalizer is applied
+ * consistently to every group-code Map key below (never to `basis.mysqlValue`/
+ * `basis.oneCValue`, which keep the original, unaltered values for human
+ * review) so a case/whitespace-only difference no longer silently prevents
+ * an otherwise-valid group match.
+ */
+function normalizeGroupCodeKey(code: string): string {
+	return code.trim().toUpperCase()
 }
 
 function buildGuidIndex(oneC: ProductsFeedRecord[]): Map<string, ProductsFeedRecord[]> {
@@ -147,11 +230,32 @@ function buildVariativeIndex(oneC: ProductsFeedRecord[]): Map<string, ProductsFe
 	const index = new Map<string, ProductsFeedRecord[]>()
 	for (const record of oneC) {
 		if (record.VariativeNomenclature === null) continue
-		const list = index.get(record.VariativeNomenclature) ?? []
+		const key = normalizeGroupCodeKey(record.VariativeNomenclature)
+		const list = index.get(key) ?? []
 		list.push(record)
-		index.set(record.VariativeNomenclature, list)
+		index.set(key, list)
 	}
 	return index
+}
+
+type MatchProductResult = {
+	outcome: 'confirmed' | 'ambiguous' | 'unmatched'
+	basis: MatchBasisEntry[]
+	matchedIdNoms: string[]
+	reasoning: string
+	/** Only set when `outcome === 'confirmed'` - which key(s) actually agreed on the single resulting ID_nom (Sprint 12A.5 Task 2). */
+	confirmedKeys?: ReconciliationMatchKey[]
+	/** Only set when `outcome === 'ambiguous'` - the specific code path that produced the ambiguity, so a human reviewer can group the 495-style real result by root cause instead of re-deriving it from free text (Sprint 12A.5 Task 4). */
+	ambiguityReasonCode?: AmbiguityReasonCode
+	/**
+	 * Only set when `outcome === 'unmatched'`. `true` only when real
+	 * MySQL-side evidence (today: the product is hidden, `isShown === false`)
+	 * independently suggests the product may be discontinued/retired - never
+	 * set merely because no 1C candidate was found (Sprint 12A.5 Task 5: the
+	 * user was explicit that "unmatched" must not be assumed to mean
+	 * "discontinued" without real supporting evidence).
+	 */
+	possiblyDiscontinued: boolean
 }
 
 function matchProduct(
@@ -160,7 +264,7 @@ function matchProduct(
 	guidIndex: Map<string, ProductsFeedRecord[]>,
 	barcodeIndex: Map<string, ProductsFeedRecord[]>,
 	variativeIndex: Map<string, ProductsFeedRecord[]>
-): { outcome: 'confirmed' | 'ambiguous' | 'unmatched'; basis: MatchBasisEntry[]; matchedIdNoms: string[]; reasoning: string } {
+): MatchProductResult {
 	const basis: MatchBasisEntry[] = []
 	const candidateIdNoms = new Set<string>()
 
@@ -194,8 +298,9 @@ function matchProduct(
 	const groupCode = detectGroupCode(product.sku)
 	let groupMatches: ProductsFeedRecord[] = []
 	if (groupCode !== null) {
-		const mysqlSiblings = groupCodeOwners.get(groupCode) ?? []
-		const oneCGroup = variativeIndex.get(groupCode) ?? []
+		const normalizedGroupCode = normalizeGroupCodeKey(groupCode)
+		const mysqlSiblings = groupCodeOwners.get(normalizedGroupCode) ?? []
+		const oneCGroup = variativeIndex.get(normalizedGroupCode) ?? []
 		if (mysqlSiblings.length === 1 && oneCGroup.length === 1) {
 			groupMatches = oneCGroup
 			basis.push({ key: 'variative_nomenclature_group', mysqlValue: groupCode, oneCValue: oneCGroup[0].ID_nom })
@@ -204,6 +309,12 @@ function matchProduct(
 	}
 
 	if (candidateIdNoms.size === 0) {
+		// Sprint 12A.5 Task 5: `isShown === false` is the one real,
+		// independently-recorded MySQL-side signal available today that a
+		// product may be discontinued/retired. Any other unmatched product
+		// gets `possiblyDiscontinued: false` and falls into the neutral
+		// "needs investigation" bucket - never assumed discontinued merely
+		// because no 1C candidate was found.
 		return {
 			outcome: 'unmatched',
 			basis,
@@ -211,7 +322,8 @@ function matchProduct(
 			reasoning:
 				product.guid === null && product.barcode === null && groupCode === null
 					? 'no GUID, barcode, or group-code SKU available to match against the 1C feed'
-					: 'no 1C record found on any available key (GUID/ID_nom, barcode, or group-code)'
+					: 'no 1C record found on any available key (GUID/ID_nom, barcode, or group-code)',
+			possiblyDiscontinued: product.isShown === false
 		}
 	}
 
@@ -222,10 +334,13 @@ function matchProduct(
 			outcome: 'confirmed',
 			basis,
 			matchedIdNoms: [idNom],
-			reasoning: `unambiguous match on ${keysAgreeing.join(', ')}`
+			reasoning: `unambiguous match on ${keysAgreeing.join(', ')}`,
+			confirmedKeys: keysAgreeing,
+			possiblyDiscontinued: false
 		}
 	}
 
+	const ambiguityReasonCode: AmbiguityReasonCode = candidateIdNoms.size > 1 ? 'conflicting_candidates' : 'duplicate_1c_records_on_single_key'
 	return {
 		outcome: 'ambiguous',
 		basis,
@@ -233,7 +348,9 @@ function matchProduct(
 		reasoning:
 			candidateIdNoms.size > 1
 				? `multiple distinct 1C candidates found (${[...candidateIdNoms].join(', ')}) across the available keys - conflicting or duplicate signals`
-				: 'a single key matched more than one 1C record (duplicate ID_nom/barcode in the 1C input)'
+				: 'a single key matched more than one 1C record (duplicate ID_nom/barcode in the 1C input)',
+		ambiguityReasonCode,
+		possiblyDiscontinued: false
 	}
 }
 
@@ -255,27 +372,33 @@ export function reconcileSqlWith1c(
 	for (const p of dump.products) {
 		const code = detectGroupCode(p.sku)
 		if (code === null) continue
-		const list = groupCodeOwners.get(code) ?? []
+		const key = normalizeGroupCodeKey(code)
+		const list = groupCodeOwners.get(key) ?? []
 		list.push(p.id)
-		groupCodeOwners.set(code, list)
+		groupCodeOwners.set(key, list)
 	}
 
 	const mysqlResults: MysqlReconciliationResult[] = []
 	const counts: Record<ReconciliationOutcome, number> = { confirmed: 0, ambiguous: 0, unmatched: 0, quarantine: 0 }
-	const byMatchKey: Record<ReconciliationMatchKey, number> = { guid_id_nom: 0, barcode: 0, variative_nomenclature_group: 0 }
+	const byMatchKeyCandidates: Record<ReconciliationMatchKey, number> = { guid_id_nom: 0, barcode: 0, variative_nomenclature_group: 0 }
+	const byMatchKeyConfirmedEntities: Record<ReconciliationMatchKey, number> = { guid_id_nom: 0, barcode: 0, variative_nomenclature_group: 0 }
+	const ambiguousByReasonCode: Record<AmbiguityReasonCode, number> = { conflicting_candidates: 0, duplicate_1c_records_on_single_key: 0 }
+	let possiblyDiscontinuedCount = 0
 	const exampleIds: Record<ReconciliationOutcome, number[]> = { confirmed: [], ambiguous: [], unmatched: [], quarantine: [] }
 	const matchedIdNomsOverall = new Set<string>()
 
 	for (const product of dump.products) {
 		const existingQuarantine = priorQuarantine?.get(product.id)
-		const { outcome: rawOutcome, basis, matchedIdNoms, reasoning } = matchProduct(
-			product,
-			groupCodeOwners,
-			guidIndex,
-			barcodeIndex,
-			variativeIndex
-		)
-		for (const b of basis) byMatchKey[b.key]++
+		const {
+			outcome: rawOutcome,
+			basis,
+			matchedIdNoms,
+			reasoning,
+			confirmedKeys,
+			ambiguityReasonCode,
+			possiblyDiscontinued
+		} = matchProduct(product, groupCodeOwners, guidIndex, barcodeIndex, variativeIndex)
+		for (const b of basis) byMatchKeyCandidates[b.key]++
 		for (const idNom of matchedIdNoms) matchedIdNomsOverall.add(idNom)
 
 		const outcome: ReconciliationOutcome =
@@ -283,6 +406,30 @@ export function reconcileSqlWith1c(
 		counts[outcome]++
 		if (exampleIds[outcome].length < EXAMPLE_LIMIT) exampleIds[outcome].push(product.id)
 
+		// These three aggregates are only meaningful for the *raw* outcome a
+		// quarantined product would otherwise have had - a quarantined
+		// product's matching evidence is still counted here (it is useful
+		// context for whoever resolves the quarantine), per the module's
+		// standing "quarantine evidence is attached, never overridden" rule.
+		if (rawOutcome === 'confirmed' && confirmedKeys) {
+			for (const key of confirmedKeys) byMatchKeyConfirmedEntities[key]++
+		}
+		if (rawOutcome === 'ambiguous' && ambiguityReasonCode) {
+			ambiguousByReasonCode[ambiguityReasonCode]++
+		}
+		if (rawOutcome === 'unmatched' && possiblyDiscontinued) {
+			possiblyDiscontinuedCount++
+		}
+
+		// confirmedKeys/ambiguityReasonCode/possiblyDiscontinued describe the
+		// *raw* 1C-matching attempt (`rawOutcome`). Consistent with `basis`/
+		// `reasoning` elsewhere in this function, a prior quarantine never
+		// erases this evidence - it is attached as context for whoever
+		// resolves the quarantine, exactly like the "1C match attempt: ..."
+		// suffix already appended to `reasoning` below. A field is only
+		// non-empty when `rawOutcome` actually produced it (e.g.
+		// `confirmedKeys` stays `undefined` unless `rawOutcome === 'confirmed'`),
+		// regardless of what the final, quarantine-aware `outcome` ends up being.
 		mysqlResults.push({
 			legacyProductId: product.id,
 			mysqlGuid: product.guid,
@@ -293,6 +440,9 @@ export function reconcileSqlWith1c(
 				outcome === 'quarantine'
 					? `already quarantined by the Sprint 12A.2 catalog dry-run (${existingQuarantine?.join(', ')}) - reconciliation evidence attached but does not clear the quarantine. 1C match attempt: ${reasoning}`
 					: reasoning,
+			confirmedKeys,
+			ambiguityReasonCode,
+			possiblyDiscontinued,
 			priorQuarantineReasonCodes: existingQuarantine
 		})
 	}
@@ -322,7 +472,10 @@ export function reconcileSqlWith1c(
 			unmatched: counts.unmatched,
 			quarantine: counts.quarantine,
 			unmatchedOneCRecordCount: unmatchedOneCRecords.length,
-			byMatchKey,
+			byMatchKeyCandidates,
+			byMatchKeyConfirmedEntities,
+			ambiguousByReasonCode,
+			possiblyDiscontinuedCount,
 			examples
 		},
 		mysqlResults,

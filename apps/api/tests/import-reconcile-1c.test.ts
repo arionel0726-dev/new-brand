@@ -84,7 +84,9 @@ describe('reconcileSqlWith1c', () => {
 		expect(result.mysqlResults[0].basis).toEqual([{ key: 'guid_id_nom', mysqlValue: '10568', oneCValue: '10568' }])
 		expect(result.mysqlResults[0].matchedOneCIdNoms).toEqual(['10568'])
 		expect(result.summary.confirmed).toBe(1)
-		expect(result.summary.byMatchKey.guid_id_nom).toBe(1)
+		expect(result.summary.byMatchKeyCandidates.guid_id_nom).toBe(1)
+		expect(result.summary.byMatchKeyConfirmedEntities.guid_id_nom).toBe(1)
+		expect(result.mysqlResults[0].confirmedKeys).toEqual(['guid_id_nom'])
 	})
 
 	test('confirmed match via barcode when GUID is absent', () => {
@@ -94,7 +96,8 @@ describe('reconcileSqlWith1c', () => {
 
 		expect(result.mysqlResults[0].outcome).toBe('confirmed')
 		expect(result.mysqlResults[0].basis[0].key).toBe('barcode')
-		expect(result.summary.byMatchKey.barcode).toBe(1)
+		expect(result.summary.byMatchKeyCandidates.barcode).toBe(1)
+		expect(result.summary.byMatchKeyConfirmedEntities.barcode).toBe(1)
 	})
 
 	test('ambiguous when two 1C records share the same ID_nom as one MySQL GUID (duplicate 1C input)', () => {
@@ -232,5 +235,127 @@ describe('reconcileSqlWith1c', () => {
 		expect(result.summary.quarantine).toBe(1)
 		expect(result.summary.examples.confirmed[0].legacyProductId).toBe(1)
 		expect(result.summary.examples.quarantine[0].legacyProductId).toBe(3)
+	})
+
+	// Sprint 12A.5 Task 3: the real reconciliation run reported ZERO
+	// variative_nomenclature_group matches despite 1536 distinct 1C
+	// VariativeNomenclature values observed. Code review found the Map-key
+	// join between the MySQL-side group-code index and the 1C-side
+	// VariativeNomenclature index was case-sensitive - this test pins the fix.
+	test('VariativeNomenclature group-code match fires despite a case/whitespace-only difference between the MySQL SKU and the 1C VariativeNomenclature', () => {
+		const result = reconcileSqlWith1c(dump([product({ id: 1, guid: null, barcode: null, sku: 'a10.xxx' })]), [
+			oneC({ ID_nom: '55', VariativeNomenclature: ' A10.XXX ' })
+		])
+
+		expect(result.mysqlResults[0].outcome).toBe('confirmed')
+		expect(result.mysqlResults[0].basis[0]).toEqual({
+			key: 'variative_nomenclature_group',
+			// The original, un-normalized values are preserved for human review.
+			mysqlValue: 'a10.xxx',
+			oneCValue: '55'
+		})
+	})
+
+	// Sprint 12A.5 Task 2
+	describe('byMatchKeyCandidates vs byMatchKeyConfirmedEntities', () => {
+		test('a candidate-only signal (duplicate 1C barcode, still ambiguous) counts in Candidates but not in ConfirmedEntities', () => {
+			const result = reconcileSqlWith1c(dump([product({ id: 1, guid: null, barcode: 'bc-1' })]), [
+				oneC({ ID_nom: '1', Barcode: 'bc-1' }),
+				oneC({ ID_nom: '2', Barcode: 'bc-1' })
+			])
+
+			expect(result.mysqlResults[0].outcome).toBe('ambiguous')
+			// Two candidate signals contributed (one basis entry per matching 1C record).
+			expect(result.summary.byMatchKeyCandidates.barcode).toBe(2)
+			// Never confirmed, so it must not count toward ConfirmedEntities.
+			expect(result.summary.byMatchKeyConfirmedEntities.barcode).toBe(0)
+		})
+
+		test('a confirmed match where two keys agree counts once under each key in ConfirmedEntities', () => {
+			const result = reconcileSqlWith1c(dump([product({ id: 1, guid: '1', barcode: 'bc-1' })]), [
+				oneC({ ID_nom: '1', Barcode: 'bc-1' })
+			])
+
+			expect(result.mysqlResults[0].outcome).toBe('confirmed')
+			expect(result.mysqlResults[0].confirmedKeys?.sort()).toEqual(['barcode', 'guid_id_nom'])
+			expect(result.summary.byMatchKeyConfirmedEntities.guid_id_nom).toBe(1)
+			expect(result.summary.byMatchKeyConfirmedEntities.barcode).toBe(1)
+		})
+	})
+
+	// Sprint 12A.5 Task 4
+	describe('ambiguityReasonCode', () => {
+		test('conflicting_candidates: GUID and barcode point at two different 1C records', () => {
+			const result = reconcileSqlWith1c(dump([product({ id: 1, guid: '1', barcode: 'bc-2' })]), [
+				oneC({ ID_nom: '1' }),
+				oneC({ ID_nom: '2', Barcode: 'bc-2' })
+			])
+
+			expect(result.mysqlResults[0].outcome).toBe('ambiguous')
+			expect(result.mysqlResults[0].ambiguityReasonCode).toBe('conflicting_candidates')
+			expect(result.summary.ambiguousByReasonCode.conflicting_candidates).toBe(1)
+			expect(result.summary.ambiguousByReasonCode.duplicate_1c_records_on_single_key).toBe(0)
+		})
+
+		test('duplicate_1c_records_on_single_key: one candidate ID_nom, but that key hit more than one 1C record', () => {
+			const result = reconcileSqlWith1c(dump([product({ id: 1, guid: '1' })]), [
+				oneC({ ID_nom: '1' }),
+				oneC({ ID_nom: '1' })
+			])
+
+			expect(result.mysqlResults[0].outcome).toBe('ambiguous')
+			expect(result.mysqlResults[0].ambiguityReasonCode).toBe('duplicate_1c_records_on_single_key')
+			expect(result.summary.ambiguousByReasonCode.duplicate_1c_records_on_single_key).toBe(1)
+		})
+	})
+
+	// Sprint 12A.5 Task 5
+	describe('possiblyDiscontinued evidence', () => {
+		test('unmatched AND hidden in MySQL (isShown === false) is flagged possiblyDiscontinued', () => {
+			const result = reconcileSqlWith1c(dump([product({ id: 1, guid: '1', isShown: false })]), [])
+
+			expect(result.mysqlResults[0].outcome).toBe('unmatched')
+			expect(result.mysqlResults[0].possiblyDiscontinued).toBe(true)
+			expect(result.summary.possiblyDiscontinuedCount).toBe(1)
+		})
+
+		test('unmatched but still shown (isShown === true) is NOT assumed discontinued - lands in the neutral bucket', () => {
+			const result = reconcileSqlWith1c(dump([product({ id: 1, guid: '1', isShown: true })]), [])
+
+			expect(result.mysqlResults[0].outcome).toBe('unmatched')
+			expect(result.mysqlResults[0].possiblyDiscontinued).toBe(false)
+			expect(result.summary.possiblyDiscontinuedCount).toBe(0)
+		})
+
+		test('possiblyDiscontinued is false for a confirmed match even if the product happens to be hidden (the raw attempt was never "unmatched")', () => {
+			const result = reconcileSqlWith1c(dump([product({ id: 1, guid: '1', isShown: false })]), [oneC({ ID_nom: '1' })])
+
+			expect(result.mysqlResults[0].outcome).toBe('confirmed')
+			expect(result.mysqlResults[0].possiblyDiscontinued).toBe(false)
+		})
+
+		test('a prior quarantine never erases possiblyDiscontinued evidence from the raw match attempt - it stays attached, same as reasoning/basis', () => {
+			const priorQuarantine = new Map<number, QuarantineReasonCode[]>([[2, ['duplicate_sku']]])
+			const result = reconcileSqlWith1c(
+				dump([product({ id: 2, guid: '9', isShown: false })]), // raw attempt: unmatched + hidden, then overridden to quarantine
+				[oneC({ ID_nom: '1' })],
+				priorQuarantine
+			)
+
+			expect(result.mysqlResults[0].outcome).toBe('quarantine')
+			// The raw match attempt (unmatched + hidden) is preserved as context for whoever resolves the quarantine.
+			expect(result.mysqlResults[0].possiblyDiscontinued).toBe(true)
+			// The aggregate counts the same raw-attempt evidence, consistent with byMatchKeyCandidates/ambiguousByReasonCode.
+			expect(result.summary.possiblyDiscontinuedCount).toBe(1)
+		})
+	})
+
+	// Sprint 12A.5 Task 7: the new diagnostic fields must never leak raw row data.
+	test('the new Sprint 12A.5 diagnostic fields are enums/booleans/ids only - never raw field values', () => {
+		const result = reconcileSqlWith1c(dump([product({ id: 1, guid: '1', isShown: false })]), [])
+		const serialized = JSON.stringify(result.summary)
+		// Every value in the summary must be a number, a known enum string, or structural - spot-check no accidental string leakage beyond known enum keys.
+		expect(serialized).not.toContain('titleRu')
+		expect(serialized).not.toContain('descRu')
 	})
 })

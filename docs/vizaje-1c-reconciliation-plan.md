@@ -465,3 +465,206 @@ Printed to stdout, in this order:
 Nothing is written to PostgreSQL, nothing mutates
 `external_entity_mappings`, and no file under `docs/legacy-reference/` or
 `docs/legacy-audit/` is ever touched by this tool.
+
+## 8. Sprint 12A.5 — findings from the real reconciliation run
+
+The user ran the Sprint 12A.4 CLI against the real legacy SQL dump and
+the four real 1C JSON exports on their own Mac and reported the
+aggregate numbers back. Nobody on this side of the sandbox has seen the
+underlying rows - every finding below either traces to a code-level
+review of `reconcile-1c-local.ts`/`sql-1c-reconciliation.ts`/
+`duplicate-id-nom.ts` that explains *why* a reported number came out the
+way it did, or is explicitly flagged as needing a further local run to
+confirm. Numbered to match the user's own 8 tasks.
+
+### 1. Barcode-only `ID_nom` duplicates (real run: 768/771 `conflicting`, 0 `variant_or_warehouse`)
+
+**Root cause found and fixed.** `duplicate-id-nom.ts`'s Sprint 12A.4
+classifier put `Barcode` in the same bucket as any unrecognized field
+(`Brand`, a title, a category column, ...) - so any pair of rows sharing
+one `ID_nom` but differing in `Barcode` landed in `conflicting`,
+indistinguishable from a real brand/category conflict. Given the real
+audit's own finding that `Barcode` is 99.9% distinct in `products.json`,
+a `Barcode` difference between two rows sharing one `ID_nom` is the
+overwhelmingly common shape of a "duplicate" - which fully explains both
+the 768-conflicting / 0-variant_or_warehouse split and why the category
+built for exactly this case never fired.
+
+**Fixed**: `Barcode`-only differences now classify as their own
+`barcode_only_conflict` category, distinct from a general `conflicting`
+field (e.g. `Brand`) and distinct from `variant_or_warehouse`. This is a
+classification change only - nothing is merged, split, or resolved
+automatically; a human still decides whether a given group is a
+multi-pack, a corrected barcode, or something else. **Needs a new local
+run** to see the real `barcode_only_conflict` vs. true `conflicting`
+split - re-run `import:legacy:reconcile-1c-local` and read the updated
+`byClassification` breakdown for `products.json`.
+
+### 2. `byMatchKey` semantics (real run: 7365 guid/ID_nom + 56684 barcode, vs. 6999 products)
+
+**Root cause found and the API clarified.** `sql-1c-reconciliation.ts`'s
+counter incremented once per `basis` entry - i.e. once per *candidate
+signal*, not once per product. A MySQL product whose barcode hits several
+1C records sharing that barcode (a duplicate on the 1C side) contributes
+one entry *per 1C record it hit*, not one. That is the entire explanation
+for 56684 "barcode matches" against 6999 products: it is overwhelmingly
+counting 1C-side barcode duplicates being discovered as candidates, not
+6999-ish real matches.
+
+**Fixed**: the single `byMatchKey` field is now two explicit fields:
+- `byMatchKeyCandidates` - the old meaning, renamed for clarity (every
+  candidate signal, can vastly exceed `totalMysqlProducts`).
+- `byMatchKeyConfirmedEntities` - one count per key, per product whose
+  *final* match was `confirmed` and where that key contributed to the
+  single agreed-upon `ID_nom`. This is the number to read for "how many
+  real products were confirmed via key K" - it can never exceed
+  `confirmed × 3`.
+
+Each `MysqlReconciliationResult` also now carries `confirmedKeys` (which
+key(s) agreed, only set for a confirmed raw match). **Needs a new local
+run** to see the real `byMatchKeyConfirmedEntities` numbers - these are
+the trustworthy per-entity counts the old single field could not provide.
+
+### 3. `variative_nomenclature_group` matching 0 real matches despite 1536 distinct values
+
+**Root cause found and fixed - a real implementation bug, not just data
+sparsity.** `detectGroupCode`'s regex test runs case-insensitively (the
+`/i` flag), but the `Map` lookups that join the MySQL-side group-code
+index against the 1C-side `VariativeNomenclature` index used the raw,
+un-normalized string as the key - and JS `Map` keys are case-sensitive.
+A MySQL `SKU` of `"a10.xxx"` and a 1C `VariativeNomenclature` of
+`"A10.XXX"` represent the same group (Sprint 12A.2 §13.3) but would
+never collide as `Map` keys, silently preventing every such match.
+
+Sprint 12A.2's finding that this group-code pattern is genuinely rare on
+the MySQL side (only a minority of the 128 SKU-duplicate groups follow
+it) is **also still true** and likely explains why the real count would
+stay low even after this fix - but a hard 0 despite 1536 distinct 1C
+values pointed at a code bug on top of that rarity, and the bug is now
+confirmed and fixed.
+
+**Fixed**: a `normalizeGroupCodeKey()` helper (`trim().toUpperCase()`)
+is now applied consistently to every group-code `Map` key (never to the
+`basis.mysqlValue`/`oneCValue` shown to a human, which stay as the
+original values). **Needs a new local run** to see the real non-zero
+`variative_nomenclature_group` count this unlocks.
+
+### 4. The 495 ambiguous products - classification taxonomy
+
+**Taxonomy enumerated and basis exposure extended**, per Sprint 12A.3's
+own promise that "every match result must carry its basis." Reading
+`matchProduct`, there are exactly two distinct code paths that produce
+`'ambiguous'`:
+
+- `conflicting_candidates` - two or more *different* ID_nom values were
+  found across the available keys (e.g. GUID points at one 1C record,
+  Barcode points at a different one). A genuine cross-key disagreement.
+- `duplicate_1c_records_on_single_key` - exactly one candidate ID_nom was
+  found, but a single key hit more than one 1C record sharing that value
+  (the 1C input itself has a duplicate on that key - consistent with the
+  real ID_nom-duplicate-within-1C finding).
+
+Both are now a typed `ambiguityReasonCode` on every `'ambiguous'` result,
+plus `summary.ambiguousByReasonCode` giving the aggregate split. **Needs
+a new local run** to see how the real 495 actually split between the two
+causes - that split was never previously surfaced at all.
+
+### 5. The 128 unmatched products - discontinued vs. "needs investigation"
+
+**Implemented exactly as the user specified: evidence-gated, not
+assumed.** The only real, independently-recorded MySQL-side signal
+available today is `products.is_shown` (the Phase A published/hidden
+flag - 6884/115 in the real audit). A new `possiblyDiscontinued: boolean`
+field is `true` **only** when a product's raw match attempt was
+`unmatched` *and* `isShown === false`; every other unmatched product gets
+`false` and stays in the neutral "needs investigation" bucket, exactly as
+instructed - unmatched is never assumed to mean discontinued on its own.
+`summary.possiblyDiscontinuedCount` gives the aggregate. **Needs a new
+local run** to see how many of the real 128 actually carry this
+evidence.
+
+### 6. Duplicate `ID_nom` in pricevn.json - price-selection determinism
+
+**Finding: no price-selection code exists anywhere in this project
+today** - `pricevn.json` is currently used only for its own
+duplicate-`ID_nom` classification and an ID_nom-coverage check against
+the SQL-matched set (`reconcile-1c-local.ts`); nothing reads a `Price` or
+`DiscountPrice` value out of a pricevn record and assigns it to anything.
+There is therefore no first-wins/last-wins bug to fix in this sprint,
+because there is no selection logic at all yet - that is a Phase B /
+future price-sync concern, explicitly out of scope.
+
+What *was* a real gap, and is fixed: `duplicate-id-nom.ts`'s classifier
+previously lumped a genuine `Price`/`DiscountPrice` disagreement into the
+same soft `mutable_only` bucket as `QuantityBalance`/`PriceWH` - treating
+a real pricing conflict as casually as a stock-count snapshot difference.
+`Price`/`DiscountPrice` differences are now their own `price_conflict`
+category, ranked more severe than `mutable_only` (but less severe than an
+unrecognized-field `conflicting`), so a future price-sync feature has a
+distinct, un-missable signal to check before it is ever allowed to pick
+either value automatically. **Needs a new local run** to see the real
+`price_conflict` count within pricevn.json's 84 duplicate groups (the
+previously-unaccounted-for remainder of the 84 − 46 = 38 groups the user
+flagged splits across `price_conflict`/`mutable_only`/`identical` -
+`reconcile-1c-local.ts` already printed the full `byClassification`
+object, including these, before this sprint; the user's chat summary
+just didn't quote every field).
+
+### 7. CLI output sanitization
+
+Reviewed `reconcile-1c-local.ts`'s print paths against every new field
+added this sprint: `confirmedKeys`/`ambiguityReasonCode` are closed
+enums, `possiblyDiscontinued`/`byClassification` counts are
+booleans/numbers, `barcode_only_conflict`/`price_conflict` are
+classification labels. None of this sprint's additions introduce a path
+that prints a raw field value - the existing "ids, reason codes, and
+field *names* only" discipline from Sprint 12A.2-12A.4 holds. No code
+change was needed here; the regression test
+`'the new Sprint 12A.5 diagnostic fields are enums/booleans/ids only'`
+pins this.
+
+### 8. Is the ~5973-confirmed-match subset ready for a safe test import?
+
+**Honest answer: closer than before this sprint, but still not a clean
+yes.** Layering this sprint's findings on top of Sprint 12A.2's standing
+data-quality findings:
+
+- **Identifier stability**: stronger than previously known.
+  `byMatchKeyConfirmedEntities` (once re-run) will show real per-key
+  reliance; the `variative_nomenclature_group` fix may move some
+  currently-`ambiguous`/`unmatched` products into `confirmed` on a
+  *more* trustworthy signal than before, since it closes a real bug
+  rather than relying on luck.
+- **Pricing**: this sprint found no live pricing *use* to audit (none
+  exists yet), but it does mean no confirmed-matched product's price has
+  ever been silently resolved incorrectly - there was simply nothing
+  reading pricevn data into anything yet. This is a readiness
+  *prerequisite* now properly flagged (`price_conflict`) rather than a
+  risk that was already live.
+- **Variants/localization/brand-category**: unchanged from Sprint
+  12A.2's findings - the 3 uncategorizable products (1455/6519/7698, to
+  import unpublished/uncategorized per the user's decision), the
+  SKU-duplicate groups (now understood to often be mis-modeled variant
+  families per 12A.2 §13.3, to be reconstructed as real V2 variants per
+  the user's decision, not synthetic SKUs), and the 6%-real-SEO-slug
+  coverage all still apply to whichever confirmed-matched products they
+  intersect with - this sprint did not re-touch any of that.
+- **Orphan variants**: the 463-`product_id=1` cluster and the remaining
+  258 orphans are explicitly *not* resolved by anything in this sprint -
+  per the user's standing decision, they stay quarantined until checked
+  against real row-level 1C data, which is still not available in this
+  sandbox.
+
+**Still not safe to call "ready" without a new local run**: every fix in
+this sprint (barcode-only distinction, byMatchKey split, group-code
+case-normalization, ambiguity taxonomy, discontinued-evidence flag,
+price-conflict category) changes *how the tool reports*, not what the
+real catalog actually contains - the real `confirmed`/`ambiguous`/
+`unmatched` counts will almost certainly shift once re-run with these
+fixes (most likely: some currently-`unmatched`/`ambiguous` products move
+into `confirmed` via the group-code fix; some currently-`conflicting`
+duplicate-ID_nom groups move into `barcode_only_conflict`/
+`price_conflict`). **Phase B readiness should be re-assessed only after**
+a fresh `import:legacy:reconcile-1c-local` run against the real files
+with this sprint's code, not against the numbers quoted in the Sprint
+12A.5 request.
