@@ -443,20 +443,30 @@ Printed to stdout, in this order:
 2. **Unmatched 1C records** - a sample (up to 10) of `products.json`
    records with no MySQL match on any key.
 3. **Duplicate `ID_nom` classification: products.json** - counts by
-   `identical` / `conflicting` / `mutable_only` / `variant_or_warehouse`,
-   plus a bounded number of examples (ids, record counts, and differing
-   field *names* only).
-4. *(if `--old-products` given)* **Secondary reconciliation via
+   `identical` / `conflicting` / `price_conflict` / `barcode_only_conflict`
+   / `variant_or_warehouse` / `mutable_only`, plus a bounded number of
+   examples (ids, record counts, and differing field *names* only).
+4. **Family reconciliation summary** (Sprint 12A.7) -
+   `VariativeNomenclature` treated as a *candidate* parent-family
+   identifier rather than an individual match key: family-level counts
+   (`confirmedFamilies` / `ambiguousFamilies` / `unmatchedMysqlFamilies` /
+   `unmatchedOneCFamilies` / `collisionRiskFamilies` /
+   `conflictingMembershipCount`) and position-level counts
+   (`confirmedPositions` / `ambiguousPositions` / `unmatchedPositions` /
+   `quarantinedPositions`), plus a bounded number of sanitized examples.
+   See §10 below for the full model and what "confirmed" actually
+   requires.
+6. *(if `--old-products` given)* **Secondary reconciliation via
    old_products.json** - how many primary-unmatched products this
    stale-snapshot source offers additional (non-authoritative) evidence
    for, plus its own duplicate-`ID_nom` classification.
-5. *(if `--pricevn` given)* **pricevn.json** duplicate-`ID_nom`
+7. *(if `--pricevn` given)* **pricevn.json** duplicate-`ID_nom`
    classification and ID_nom coverage of the SQL-matched set.
-6. *(if `--jobvn` given)* **JobVN.json** duplicate-`ID_nom` classification
+8. *(if `--jobvn` given)* **JobVN.json** duplicate-`ID_nom` classification
    and ID_nom coverage of the SQL-matched set.
-7. **Quarantined variants** - the Sprint 12A.2 orphan-variant totals by
+9. **Quarantined variants** - the Sprint 12A.2 orphan-variant totals by
    reason code, unchanged by this run.
-8. **Remaining Phase B blockers** - a short reminder of what still needs a
+10. **Remaining Phase B blockers** - a short reminder of what still needs a
    human decision (the 3 uncategorizable products, the `product_id=1`
    orphan cluster, the SKU-duplicate variant-restructuring approach, and
    whatever this specific run's duplicate-`ID_nom` classification turned
@@ -902,3 +912,89 @@ the three barcode-modeling options to pursue) and the §12A.6-C
 family-vs-individual matching redesign, are the concrete items this
 sprint identifies as needing the user's/employee's further input before
 any of them becomes implementation work.
+
+## 10. Sprint 12A.7 — product family reconciliation
+
+Implements the §12A.6-C redesign recommendation: `VariativeNomenclature`
+is now matched as a **candidate parent-family identifier**, not an
+individual-record identity key. The whole-dataset per-record matcher in
+`sql-1c-reconciliation.ts` (`reconcileSqlWith1c`/`matchProduct`) is
+**unchanged** by this sprint and keeps working exactly as described in §2
+above; the new module, `apps/api/src/import/reconcile/
+family-reconciliation.ts` (`reconcileFamilies`), runs *alongside* it as an
+additive, family-first pass, and the local CLI now prints both.
+
+### 10.1 The model
+
+1. **Family indexing** (both sides). The MySQL side is indexed by the same
+   `detectGroupCode(products.SKU)` heuristic the existing matcher already
+   uses; the 1C side by `VariativeNomenclature`. Both use the identical
+   `normalizeGroupCodeKey` (case/whitespace-insensitive) normalizer as the
+   Sprint 12A.5 fix, so the two modules can never disagree on what counts
+   as "the same code" - but every original, un-normalized code string seen
+   is preserved (`mysqlOriginalCodes`/`oneCOriginalCodes`) for human
+   review, never discarded.
+2. **Family matching is many-to-many by design.** A family with multiple
+   members on both sides is the *expected* shape (per the employee's
+   confirmation #2 and Sprint 12A.2's 128 real `products.SKU`-duplicate
+   groups) - not, by itself, evidence of anything wrong.
+3. **A family match is never trusted on code-string equality alone.**
+   Because `VariativeNomenclature`'s global uniqueness is explicitly
+   unverified (confirmation #3), every family candidate is checked for
+   independent GUID/barcode **corroboration** (a member pair where the
+   MySQL product's own GUID or barcode resolves to a 1C `ID_nom` that is
+   actually a member of this same family) and for **contradiction** (a
+   member's GUID/barcode resolving to a 1C record *outside* the family -
+   evidence the group code may be coincidentally reused by two unrelated
+   product lines). A family is `confirmed_family` only when it has at
+   least one corroboration and zero contradictions; otherwise it is
+   `ambiguous_family` and carries `collisionRisk: true`. Nothing is ever
+   auto-merged on either outcome.
+4. **Within-family position resolution never guesses.** Once a family
+   pairing exists, each MySQL member is checked against that family's own
+   1C members by GUID/ID_nom and by barcode - but barcode is matched as a
+   **set per `ID_nom`** (every barcode seen across any row sharing that
+   `ID_nom`, unioned together), directly implementing confirmation #1 (one
+   nomenclature position can legitimately carry more than one barcode) in
+   the matching logic itself, with no database schema change (per
+   §12A.6-B, that remains a documented Phase B option, not applied). A
+   member with zero within-family candidates is `unmatched_position`
+   (never assigned by sibling order or member-count equality); a member
+   whose own evidence contradicts the family is `ambiguous_position`.
+5. **Conflicting membership.** An `ID_nom` observed under two *different*
+   normalized family codes across the 1C feed's own rows (a real
+   possibility given the 1C-side ID_nom-duplicate findings from Sprint
+   12A.3/12A.5) is reported as its own `ConflictingMembership` entry,
+   never silently assigned to either family.
+6. **Quarantine is absolute.** A MySQL product already quarantined by the
+   Sprint 12A.2 catalog dry-run always reports a `'quarantine'` family
+   position, regardless of how strong the family-level evidence is - the
+   family itself may still show `confirmed_family` (useful context for
+   whoever resolves the quarantine), but the specific position never
+   escapes quarantine through this path. The 463-orphan-variant
+   `product_id=1` cluster has no `sku` group code at all, so it never
+   enters a family bucket in the first place; the quarantine check exists
+   independently in case that ever changes.
+7. **Duplicate-`ID_nom` and price-conflict handling is untouched.** This
+   module never reads `Price`/`DiscountPrice` and never merges or drops a
+   duplicate-`ID_nom` row - `duplicate-id-nom.ts`'s classification of
+   *why* an `ID_nom` has multiple rows remains the sole authority on that
+   question; family reconciliation only asks the orthogonal "which family"
+   question.
+
+### 10.2 What a real run would still need to answer
+
+Family-level matching does not resolve the three open questions from §9 -
+if anything it sharpens why they matter: a confident `confirmed_family`
+result depends on at least one GUID/barcode corroboration existing at
+all, which in turn depends on how much of the real MySQL-side dump
+actually carries a GUID or barcode. The `collisionRiskFamilies` and
+`conflictingMembershipCount` figures from a real run are the concrete
+signal to look at first for whether `VariativeNomenclature` collisions
+are a real, non-trivial risk in the live catalog, or a theoretical one.
+
+No code in this sprint reads or claims to have read the user's real local
+files - `reconcileFamilies` was built and tested exclusively against
+synthetic fixtures shaped like the real field layouts already confirmed
+in `docs/legacy-audit/vizaje-1c-audit.{md,json}` and the real numbers the
+user reported from their Sprint 12A.4/12A.5 runs.

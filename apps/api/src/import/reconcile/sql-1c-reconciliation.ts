@@ -178,7 +178,8 @@ const EXAMPLE_LIMIT = 3
  */
 const GROUP_CODE_PATTERN = /^[a-z]{0,3}\d+[a-z]*\.[a-z0-9.]+$/i
 
-function detectGroupCode(sku: string | null): string | null {
+/** Exported for reuse by `./family-reconciliation.ts` (Sprint 12A.7), which needs the exact same group-code detection this module uses, so a family index built there stays consistent with this module's own group-matching key. */
+export function detectGroupCode(sku: string | null): string | null {
 	if (sku === null) return null
 	return GROUP_CODE_PATTERN.test(sku) ? sku : null
 }
@@ -201,11 +202,12 @@ function detectGroupCode(sku: string | null): string | null {
  * review) so a case/whitespace-only difference no longer silently prevents
  * an otherwise-valid group match.
  */
-function normalizeGroupCodeKey(code: string): string {
+export function normalizeGroupCodeKey(code: string): string {
 	return code.trim().toUpperCase()
 }
 
-function buildGuidIndex(oneC: ProductsFeedRecord[]): Map<string, ProductsFeedRecord[]> {
+/** Exported for reuse by `./family-reconciliation.ts` (Sprint 12A.7) - the full-dataset GUID==ID_nom index is also used there to detect when a family member's GUID evidence points *outside* the family being evaluated (a collision-risk signal). */
+export function buildGuidIndex(oneC: ProductsFeedRecord[]): Map<string, ProductsFeedRecord[]> {
 	const index = new Map<string, ProductsFeedRecord[]>()
 	for (const record of oneC) {
 		const list = index.get(record.ID_nom) ?? []
@@ -215,7 +217,8 @@ function buildGuidIndex(oneC: ProductsFeedRecord[]): Map<string, ProductsFeedRec
 	return index
 }
 
-function buildBarcodeIndex(oneC: ProductsFeedRecord[]): Map<string, ProductsFeedRecord[]> {
+/** Exported for reuse by `./family-reconciliation.ts` (Sprint 12A.7) - same reasoning as `buildGuidIndex` above, for barcode-based contradiction detection. */
+export function buildBarcodeIndex(oneC: ProductsFeedRecord[]): Map<string, ProductsFeedRecord[]> {
 	const index = new Map<string, ProductsFeedRecord[]>()
 	for (const record of oneC) {
 		if (record.Barcode === null) continue

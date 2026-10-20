@@ -64,6 +64,7 @@ import { readJsonArrayFileBounded } from '../parsers/json-array-stream'
 import { loadLegacyCatalogDump } from '../parsers/mysql-catalog'
 import { parseProductsFeed, type ProductsFeedRecord } from '../parsers/products-feed'
 import { classifyIdNomDuplicates, type IdNomDuplicateReport } from '../reconcile/duplicate-id-nom'
+import { reconcileFamilies } from '../reconcile/family-reconciliation'
 import { computeSecondarySourceRescues } from '../reconcile/secondary-source-rescue'
 import { quarantineMapFromCatalogDryRun, reconcileSqlWith1c, type ReconciliationResult } from '../reconcile/sql-1c-reconciliation'
 import { runLegacyCatalogDryRun } from '../dry-run-catalog'
@@ -155,6 +156,18 @@ async function main() {
 	console.log(JSON.stringify(primary.unmatchedOneCRecords.slice(0, 10), null, 2))
 
 	printDuplicateReport('products.json', classifyIdNomDuplicates(productsRaw))
+
+	console.log('\nRunning family-level reconciliation (Sprint 12A.7 - VariativeNomenclature as a candidate parent-family identifier)...')
+	const familyResult = reconcileFamilies(dump, productsValid, priorQuarantine)
+	console.log('\n=== Family reconciliation summary (products.json) ===')
+	console.log(JSON.stringify(familyResult.summary, null, 2))
+	console.log(
+		'\nNote: "confirmed" above means an independent GUID/barcode signal corroborates at least one member ' +
+			'pairing within the family - group-code string equality alone (VariativeNomenclature\'s global ' +
+			'uniqueness is unverified per Sprint 12A.6 confirmation #3) is never treated as proof by itself; ' +
+			'a family or position with no corroboration is reported "ambiguous", never silently confirmed. ' +
+			'See docs/vizaje-1c-reconciliation-plan.md §12A.7 for the full model.'
+	)
 
 	if (args.oldProducts) {
 		console.log(`\nStreaming ${args.oldProducts} (secondary/stale-snapshot source)...`)
