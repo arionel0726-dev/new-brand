@@ -52,9 +52,18 @@
  *      either value.
  *   3. `barcode_only_conflict` - (and nothing from tiers 1-2 differs)
  *      only `Barcode` differs. A distinct, less severe signal than a
- *      general conflict: plausibly a multi-pack/variant-level barcode
- *      under one `ID_nom`, but still never auto-merged or treated as
- *      proof of anything - a human decides.
+ *      general conflict. Sprint 12A.6: a VIZAJE-NICA employee confirmed
+ *      this is a *known, legitimately occurring* real-world pattern - a
+ *      single nomenclature position can have more than one barcode
+ *      (observed manually in the live 1C system). This classification
+ *      name is kept for continuity with Sprint 12A.5's real run, but it
+ *      must NOT be read as "these are probably different products" - the
+ *      confirmed interpretation is "one `ID_nom` identity, multiple
+ *      barcodes", not a conflict about identity at all. Still never
+ *      auto-merged - a human decides what to do with the confirmed
+ *      multi-barcode set. See `docs/vizaje-1c-reconciliation-plan.md`
+ *      §12A.6-A for the updated identity model and §12A.6-B for how this
+ *      maps onto V2's schema.
  *   4. `variant_or_warehouse` - (and nothing from tiers 1-3 differs)
  *      every remaining differing field is a recognized variant-attribute
  *      marker (`ColorVar`, `ColorVarMD`, `VolumeVar`) or a per-warehouse
@@ -193,7 +202,7 @@ export function classifyIdNomDuplicateGroup(idNom: string, records: Record<strin
 			recordCount: records.length,
 			classification: 'barcode_only_conflict',
 			differingFields,
-			note: 'only Barcode differs between records sharing this ID_nom - may legitimately represent multiple barcodes/packs/variant-level records, but is never auto-merged; needs human review'
+			note: 'only Barcode differs between records sharing this ID_nom - confirmed by a VIZAJE-NICA employee (Sprint 12A.6) to be a real, legitimate pattern: one nomenclature position can have multiple barcodes. Not evidence of a different product; still never auto-merged - a human decides what to do with the confirmed multi-barcode set'
 		}
 	}
 

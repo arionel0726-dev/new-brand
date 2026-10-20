@@ -80,6 +80,14 @@ describe('classifyIdNomDuplicateGroup', () => {
 		expect(result.differingFields).toEqual(['Barcode'])
 	})
 
+	test('barcode_only_conflict note reflects the Sprint 12A.6 employee confirmation, not an identity-conflict claim', () => {
+		const a = baseRecord({ Barcode: '1111111111111' })
+		const b = baseRecord({ Barcode: '2222222222222' })
+		const result = classifyIdNomDuplicateGroup('1001', [a, b])
+		expect(result.note).toContain('confirmed by a VIZAJE-NICA employee')
+		expect(result.note).toContain('Not evidence of a different product')
+	})
+
 	test('barcode_only_conflict takes priority over variant_or_warehouse/mutable_only when Barcode and those also differ', () => {
 		const a = baseRecord({ Barcode: '1111111111111', ColorVar: '396', QuantityBalance: 5 })
 		const b = baseRecord({ Barcode: '2222222222222', ColorVar: '253', QuantityBalance: 0 })

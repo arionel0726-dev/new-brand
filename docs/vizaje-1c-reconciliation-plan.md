@@ -668,3 +668,237 @@ duplicate-ID_nom groups move into `barcode_only_conflict`/
 a fresh `import:legacy:reconcile-1c-local` run against the real files
 with this sprint's code, not against the numbers quoted in the Sprint
 12A.5 request.
+
+## 9. Sprint 12A.6 — identity model update from domain-expert confirmation
+
+A VIZAJE-NICA employee who works with the live 1C system directly gave
+four confirmations that resolve open questions from §1–§8. This section
+is **analysis and architecture recommendation only** — no code change
+beyond two clarifying doc-string/note updates
+(`apps/api/src/import/reconcile/duplicate-id-nom.ts`), no migration, no
+PostgreSQL write, no auto-merge of anything. Phase B remains unstarted.
+
+### 12A.6-A. Updated identity rules
+
+| Concept | Identity | Confirmed by |
+|---|---|---|
+| `ID_nom` | **The identity of one sellable variant/nomenclature position.** Not a barcode, not a group. | Employee confirmation #2 ("Каждая позиция имеет собственный ID_nom") |
+| `Barcode` | **A non-unique-per-se attribute of an `ID_nom`.** One `ID_nom` can legitimately own *more than one* barcode. Still useful as supporting matching evidence (per §12A.3's original design — see `docs/vizaje-sql-1c-reconciliation.md` §matching-key-priority), but a barcode-level difference between two rows sharing one `ID_nom` must no longer be read as "these might be different products" — see §12A.6-B. | Employee confirmation #1 ("наблюдались вручную") |
+| `VariativeNomenclature` | **The parent-group identity** — a folder/group code in 1C that has "вариативность" (variant-configuration) switched on. When set, every `ID_nom` sharing that code is a child variant of one logical product, differing by volume, colour, or other attributes. This is exactly what Sprint 10A's `external_entity_mappings.entity_type` enum already encodes (`'nomenclature_group'` → V2 product, `'nomenclature'` → V2 product_variant — `apps/api/src/db/schema/external-entity-mappings.ts` lines 26–34) — the **data model was already correctly designed** for this before the employee's confirmation; what had gaps was the *matching code*, not the schema (see §12A.6-C). | Employee confirmation #2 |
+| `VariativeNomenclature` global uniqueness | **Unconfirmed — an open empirical question, not a fact.** Do not assume a group code is globally unique across brands/categories. The matching/import logic must tolerate (and flag, never silently trust) an accidental collision between two unrelated groups that happen to share a code string. | Employee confirmation #3, explicit |
+| `price_conflict` (Price/DiscountPrice differing within one `ID_nom` duplicate group) | **Cause unknown.** A discount-related hypothesis exists but is explicitly unconfirmed. Kept as its own classification tier (unchanged this sprint), never silently resolved. See §12A.6-D for what static analysis can and cannot say about it. | Employee confirmation #4, explicit |
+
+**Practical consequence for the reconciliation tool**: `barcode_only_conflict`
+(from `duplicate-id-nom.ts`) is **not** a conflict about product identity —
+its note text now says so explicitly (Sprint 12A.6 update). It remains its
+own classification tier (not merged into `identical`) because the
+underlying barcode *values* still need to be captured and preserved, not
+because the records are in doubt as to being "the same `ID_nom`".
+
+### 12A.6-B. Product ↔ ProductVariant ↔ Barcode design recommendation
+
+**Current V2 schema** (`apps/api/src/db/schema/product-variants.ts`):
+
+```ts
+barcode: text('barcode'),                    // single nullable column
+// ...
+uniqueIndex('product_variants_barcode_unique_idx')
+  .on(table.barcode)
+  .where(sql`${table.barcode} is not null`)  // globally unique when present
+```
+
+This assumes **one barcode per variant, globally unique**. Both halves of
+that assumption are now known to conflict with at least some real legacy
+records (confirmation #1): a single `ID_nom` → V2 `product_variant` can
+have *multiple* legitimate barcodes.
+
+Three options, with tradeoffs — **none implemented, none migrated, this
+sprint**:
+
+1. **New `product_variant_barcodes` table** (recommended direction for
+   Phase B design, not built now): `(id, product_variant_id, barcode,
+   is_primary, source_system, external_id, created_at)`, with the unique
+   constraint moved there (`barcode` globally unique across the new
+   table, nullable `is_primary` boolean or a partial unique index
+   ensuring at most one primary per variant). Cleanest fit for "many
+   barcodes, one variant" without touching `products`/`product_variants`'
+   own shape. The existing `product_variants.barcode` column would
+   either become a denormalized "primary barcode" cache (kept in sync
+   from the new table) or be dropped in favor of always joining — a
+   decision to make when this is actually scoped for Phase B, not here.
+2. **Keep a single `product_variants.barcode` as "canonical/primary"
+   only**, and preserve every *other* legacy barcode for that `ID_nom`
+   in `external_entity_mappings` or a dedicated audit/import-trail
+   table, never exposed as a second "real" barcode on the public API.
+   Lower schema-churn, but loses the ability to usefully search/scan by
+   a non-primary barcode later (e.g. a customer scanning a secondary
+   pack barcode at a kiosk would not resolve to the product).
+3. **Do nothing to the schema; dedupe at import time** by always picking
+   one barcode per `ID_nom` via a documented, deterministic rule (e.g.
+   "shortest", "first seen", "matches `Barcode` on the earliest-dated
+   feed row") and silently drop the rest. **Not recommended** — this
+   contradicts the Sprint 12 "never silently discard information"
+   principle that has held throughout every prior round, and the
+   confirmed employee information is precisely what should prevent
+   choosing this option without an explicit decision from the user.
+
+No migration file was created; no table was added. This is a documented
+recommendation for Phase B scoping, consistent with "Пока только анализ и
+рекомендации по архитектуре."
+
+### 12A.6-C. Re-examination of the Sprint 12A.5 zero-match fix — is there a second-order group-vs-individual gap?
+
+**Direct answer: yes, a real, additional gap exists beyond the
+case-sensitivity bug Sprint 12A.5 fixed — found by reading
+`matchProduct()` in `sql-1c-reconciliation.ts` (lines 293–309) against
+the employee's confirmation #2.**
+
+The relevant code:
+
+```ts
+const groupCode = detectGroupCode(product.sku)
+if (groupCode !== null) {
+  const normalizedGroupCode = normalizeGroupCodeKey(groupCode)
+  const mysqlSiblings = groupCodeOwners.get(normalizedGroupCode) ?? []
+  const oneCGroup = variativeIndex.get(normalizedGroupCode) ?? []
+  if (mysqlSiblings.length === 1 && oneCGroup.length === 1) {
+    // ... promote to a record-level match
+  }
+}
+```
+
+This only promotes a group-code hit to an individual match when **both
+sides resolve to exactly one record** (`mysqlSiblings.length === 1 &&
+oneCGroup.length === 1`). But per the employee's confirmation #2, a real
+`VariativeNomenclature` group is, by design, meant to have **multiple**
+`ID_nom` children (that is the entire point of "вариативность" being
+switched on for that group). Sprint 12A.2 §13.3 independently found the
+same shape on the MySQL side: `products.SKU` is the field being
+opportunistically read here as a "group code" (via `detectGroupCode`'s
+regex heuristic), and MySQL has no dedicated "parent group" column — the
+128 real duplicate-`SKU` groups found in Sprint 12A.2 **are** multiple
+MySQL products sharing one `SKU` value, i.e. `mysqlSiblings.length > 1`
+for every real family.
+
+**Consequence**: the `mysqlSiblings.length === 1 && oneCGroup.length ===
+1` condition is satisfied almost *never* for a genuine multi-member
+family — it can only fire for the degenerate case of a single-variant
+"family" on both sides, which is close to a contradiction in terms (a
+group with exactly one member isn't meaningfully a "group"). This means
+that even with Sprint 12A.5's case-normalization fix applied, the
+`variative_nomenclature_group` key will continue to under-fire on real
+multi-variant families, independent of case sensitivity — the case fix
+was necessary (it was blocking even the degenerate single-member case
+from ever matching) but not sufficient.
+
+This is precisely the risk the employee's framing named
+("возможно, алгоритм ошибочно сопоставляет групповой SKU с
+идентификатором отдельной номенклатуры") — though more precisely stated:
+the algorithm does not *confuse* a group code with an individual id in
+the sense of silently treating them as interchangeable; rather, its
+current design structurally **declines to use the group-code signal at
+all** for any real (multi-member) group, by requiring a 1:1 shape that
+only a non-group ever has. The net effect for a human reading Sprint
+12A.5's real run is similar either way: the key under-performs on exactly
+the data shape (`VariativeNomenclature` groups) it was built for.
+
+**Recommendation (not implemented this sprint, per "анализ и
+рекомендации" scope)**: separate *group-level candidate detection* from
+*individual-record matching* into two distinct outputs:
+
+- A **family-candidate signal**: "MySQL group-code X (N members) and 1C
+  `VariativeNomenclature` X (M members) appear to be the same family" —
+  reported as its own diagnostic category, not promoted to any individual
+  `product_id ↔ ID_nom` pairing.
+- A **within-family attribute-matching pass** (a materially new, more
+  complex piece of logic, out of scope to design in full here): once a
+  family candidate is identified, pairing *which* MySQL product
+  corresponds to *which* `ID_nom` within that family would need a second
+  signal — barcode (per §12A.6-A/B, itself now known to be many-to-one,
+  which complicates this further), `ColorVar`/`VolumeVar` attribute
+  matching, or simply leaving every within-family pairing for human
+  review rather than guessing. This is real, nontrivial design work
+  recommended for Phase B planning, not attempted here.
+
+No code change was made to `matchProduct()`'s group-matching condition
+this sprint — the finding is reported for the user's decision on how
+(and whether) to scope the family-vs-individual redesign described
+above.
+
+### 12A.6-D. Price/DiscountPrice vs. `pricevn.json` — structural analysis
+
+**What static code/schema analysis can say:**
+
+- `products.json`'s confirmed fields (per `products-feed.ts` and
+  `docs/legacy-audit/vizaje-1c-audit.md`) include `Price` and `PriceWH`,
+  but **no `DiscountPrice`**.
+- `pricevn.json`'s confirmed fields (per `pricevn-feed.ts`) include
+  `Price` and `DiscountPrice`, but **no confirmed `PriceWH`** (the
+  parser's own doc comment: "`PriceWH` was **not** present in the real
+  pricevn sample ... kept here as optional for forward compatibility").
+- `docs/vizaje-migration-architecture.md` already documented this same
+  split independently (lines 530, 543–544) and flagged
+  `promotionalReferencePrice`/`compare_at_price` as **unresolved** for
+  exactly this reason — this sprint's finding is consistent with, not a
+  contradiction of, that earlier open question.
+
+This field split is **structurally suggestive** that `pricevn.json` is
+the system's dedicated pricing feed (its only confirmed job is price +
+discount), while `products.json`'s `Price`/`PriceWH` may be a secondary,
+possibly-cached catalog-display pair (`PriceWH` reads naturally as a
+warehouse/wholesale reference price, not a discount). **This is a
+plausible structural reading, not a confirmed fact** — nothing in the
+code or any committed doc proves which feed, if either, is authoritative
+for a live price.
+
+**What this does *not* explain**: the Sprint 12A.5 `price_conflict`
+finding is about **two rows *within the same feed* sharing one `ID_nom`**
+disagreeing on `Price`/`DiscountPrice` — not a cross-feed discrepancy
+between `products.json` and `pricevn.json`. Nothing in the code, the
+Zod schemas, or any committed document explains *why* a single feed
+export would contain two differently-priced rows for the same `ID_nom`.
+The employee's discount hypothesis is a plausible explanation (e.g. one
+row captured mid-sale, one row post-sale) but is explicitly unconfirmed
+per confirmation #4, and this sprint found no code-level or data-shape
+evidence that would confirm or rule it out.
+
+**Recommended verification the user/employee would need to do** (not
+performable from code alone):
+
+1. Check whether a real `pricevn.json` duplicate-`ID_nom` group's two
+   `Price`/`DiscountPrice` values are ever consistent with a before/after
+   discount-window pair (e.g. do the differing rows carry any timestamp
+   or export-batch metadata not currently modeled in
+   `pricevn-feed.ts`'s schema that could order them?).
+2. Ask the 1C/warehouse team directly whether a single pricevn export can
+   legitimately contain the same `ID_nom` twice by design (e.g. once per
+   warehouse, once per currency, or similar to the confirmed
+   multi-barcode pattern from confirmation #1) — this would be a
+   structurally different explanation than "stale snapshot" or
+   "discount".
+3. Re-run `reconcile-1c-local` and inspect the new `price_conflict`
+   category's sanitized examples (`idNom`, `recordCount`,
+   `differingFields` only — never raw values) for any pattern in *which*
+   `ID_nom`s are affected (e.g. concentrated in one brand/category,
+   correlated with `Sex`/`NomenclatureCategory*`, or evenly spread) that
+   might narrow the hypothesis.
+
+`price_conflict` remains its own classification tier, unchanged this
+sprint — no silent resolution was added or proposed.
+
+### 12A.6 — open questions for the user/employee
+
+1. Is `VariativeNomenclature` scoped per-brand, or intended to be
+   globally unique across the whole catalog? (Confirmation #3 says this
+   is not yet verified — this is the concrete next question.)
+2. Does a `pricevn.json` export ever legitimately carry the same `ID_nom`
+   more than once by design (e.g. per-warehouse), the way `Barcode` does?
+3. Is there any export metadata (timestamp, batch id) available outside
+   the four JSON files already reviewed that could help order duplicate
+   `pricevn.json` rows chronologically?
+
+These three questions, plus the §12A.6-B schema-design decision (which of
+the three barcode-modeling options to pursue) and the §12A.6-C
+family-vs-individual matching redesign, are the concrete items this
+sprint identifies as needing the user's/employee's further input before
+any of them becomes implementation work.
