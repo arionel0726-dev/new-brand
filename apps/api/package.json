@@ -9,6 +9,7 @@
     "media:cleanup": "bun run src/media/cleanup.ts",
     "import:legacy:dry-run": "bun run src/import/cli/dry-run.ts",
     "import:legacy:catalog-dry-run": "bun run src/import/cli/catalog-dry-run.ts",
+    "import:legacy:reconcile-1c": "bun run src/import/cli/reconcile-1c.ts",
     "test": "bun test"
   },
   "dependencies": {
