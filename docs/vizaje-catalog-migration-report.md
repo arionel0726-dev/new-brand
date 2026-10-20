@@ -426,3 +426,252 @@ into any test file.
 No real catalog row was imported into PostgreSQL, no new migration was
 applied, no file was uploaded to R2, and `apps/web`'s mock data was not
 touched, per the Phase A restrictions.
+
+## 13. Sprint 12A.2 — Migration Conflict Resolution
+
+Forensic follow-up on §2/§9's open findings, run against the real
+`vizaje_catalog_only.sql` via `apps/api/src/import/dry-run-catalog.ts`'s new
+quarantine model (§13.6). Every number below is computed, not estimated.
+Phase B remains unauthorized and unimplemented; nothing here writes to
+PostgreSQL, applies a migration, or modifies any legacy source file.
+
+### 13.1 The 14 duplicate-GUID groups — classified
+
+All 14 groups share the same signature: identical `brand_id`/`category_id`,
+near-identical `titleRU`, the **same `created_at` down to the second**
+across every member, and — the strongest signal — the legacy system's own
+`uriRU` collision-handling: the first member keeps the bare GUID as its
+slug, every other member gets `<GUID>-<id>` appended. That suffixing
+behavior is the legacy application itself detecting and reacting to the
+collision at write time, not an artifact of this audit.
+
+**Classification: all 14 groups are duplicate catalog entries (the same
+product created more than once), not legitimate separate variants, not
+corrupted GUIDs, and not a coincidental collision between unrelated
+products.** Within several groups one member carries real
+`product_variable` rows (and sometimes `updated_at`) while its duplicate(s)
+carry none — e.g. GUID `103065` (ids 10486/10487): 10486 has 4 variants and
+an `updated_at`, 10487 has 0 variants and no `updated_at`. That member is
+the better candidate for "the real one," but nothing is merged or discarded
+here — this is read-only classification, per the task's own restriction.
+
+Two groups (`30369`, `36178`) additionally share a broken `price=1`
+placeholder across both members — a second, independent data-quality signal
+on the same rows, not evidence against the duplicate classification.
+
+No group in this export showed GUID reuse across genuinely unrelated
+products (different brand/category/title) — the "erroneous/malformed GUID"
+and "distinct records that happen to collide" hypotheses from the task
+brief are not supported by the data actually present.
+
+### 13.2 The 33 invalid-category-reference products — resolved where possible
+
+`products.category_id` is broken for all 33 (pointing at category id `1` or
+`56`, neither of which exists in this export — see §13.5 on exactly which
+ids are missing where). Checking `product_categories` for each of the 33:
+
+- **30 of 33 have a valid secondary category** via `product_categories` —
+  `products.category_id` is simply wrong/stale, but the product is already
+  correctly linked to a real category through the join table. These are
+  tagged `invalid_category_reference_resolvable_via_secondary` by the new
+  dry-run quarantine model; migrating them by preferring the
+  `product_categories` link over the broken `category_id` column is a
+  mechanical, low-risk fix for Phase B, but is not applied here.
+- **3 of 33 (ids `1455`, `6519`, `7698`) have no valid category anywhere** —
+  zero `product_categories` rows at all. These are tagged
+  `invalid_category_reference_unresolvable` and **genuinely need a human
+  decision** (assign a category manually, or import as uncategorized if V2
+  permits that). No category was invented to patch this, and none of the 33
+  products were dropped from consideration — all 33 are visible in the
+  dry-run's quarantine output with their specific sub-reason.
+
+### 13.3 The 128 duplicate-SKU groups — schema check and design
+
+**V2's `product_variants.sku` has a hard database-level `unique()`
+constraint** (`apps/api/src/db/schema/product-variants.ts`) — confirmed by
+reading the schema file, not assumed. The current schema **cannot** store a
+colliding legacy SKU verbatim as the primary `sku` value for more than one
+variant.
+
+Inspecting the actual duplicate groups surfaced a more specific, more
+useful finding than "128 unrelated SKU collisions": **most of the largest
+groups are legacy shade/variant families that were imported as separate
+standalone `products` rows instead of `products_variable` rows, all sharing
+one literal group-code string as their `SKU` value** — e.g. SKU `"A10.XXX"`
+(9 products, all "ANNY Nail Polish" shade variants — the same group-code
+syntax as the confirmed-real 1C `VariativeNomenclature` value from Sprint
+10A.1's ANNY fixture), `"A8.XXX.XX"` (6 products), `"a.10.150xxan"` (6
+products), `"1502artdeco"` (34 products, ARTDECO lipstick/lip-shine
+shades), `"417xx"` (22 products, Eugene Perma haircare line), `"KISSLIQUID"`
+(8 products, MAC lipstick shades). These are not SKU typos; they are
+products that should have been modeled as **one V2 parent product with
+multiple real variants**, mirroring exactly the 1C-side variant-grouping
+pattern this project already handles for the `1c` source.
+
+**Proposed design (documented only, not implemented — this is schema
+analysis, not a migration):**
+
+1. For group-code-shaped duplicate SKUs (matching the observed
+   `<letter><digits>.XXX`-style pattern), treat the group as a single V2
+   product with N variants during Phase B, exactly as the 1C
+   `VariativeNomenclature` grouping already works. This resolves the
+   uniqueness problem structurally rather than papering over it.
+2. For the remaining, genuinely flat SKU collisions (not group-code
+   shaped), V2 needs a **synthetic/internal SKU** generated at import time
+   to satisfy `product_variants.sku`'s uniqueness constraint, with the
+   **original legacy SKU preserved verbatim** — either as the
+   `external_entity_mappings.external_id` for a `product_variant`/`product`
+   mapping (if SKU, not GUID, is used as that record's external identity)
+   or, if GUID remains the external identity as recommended in §3, in a
+   dedicated nullable `legacy_sku` column added to `product_variants` in a
+   future migration. No such column exists today and none was added this
+   sprint.
+3. Whichever path is chosen, the original SKU must never be silently
+   dropped — both because it has real operational value (physical labels,
+   supplier references) and because Task 3's restriction against losing
+   identity-bearing data applies here too.
+
+### 13.4 The 721 orphan variants — cross-referenced, not fabricated
+
+`product_id=1` is referenced by **463 of the 721** orphans — a single,
+suspiciously round value, concentrated enough to suggest an application-
+level default/fallback rather than 463 independent deletions of the same
+row. The remaining **258 orphans spread across 67 other distinct missing
+`product_id` values**, each with a small count (2–14), which looks more
+consistent with genuinely deleted parent products. **This cannot be proven
+either way from a static MySQL export alone — both explanations stay open,
+and the `product_id=1` concentration is reported as an unresolved anomaly,
+not asserted as fact.**
+
+Cross-referencing orphans against real products by barcode or SKU (the only
+two identity-adjacent fields a `products_variable` row carries besides the
+broken `product_id`) recovers a possible reattachment target for **137 of
+721 (19%)** — 126 by barcode match, 97 by SKU match, with overlap. The new
+dry-run's quarantine output surfaces `possibleReattachProductId` for each
+such case *only when the match is unambiguous* (exactly one candidate
+product); ambiguous or absent matches are left unset rather than guessed.
+Checking for a `WarehouseName` group-code prefix (the same `A10.XXX`-style
+pattern as §13.3) as an alternative grouping signal recovers only 40/721 —
+not a materially better path than barcode/SKU matching.
+
+**The majority — 584 of 721 (81%) — cannot be reattached to any present
+product by any signal available in this export.** No orphan data was
+deleted, and no placeholder `product_id=1` product was fabricated to
+satisfy the foreign key; the anomaly stays flagged in the dry-run's
+`quarantinedVariants` output for a human to resolve (most plausibly against
+a future 1C cross-reference, per the task's own suggestion, since no 1C
+identifier is actually embedded in `products_variable` itself to check
+here).
+
+### 13.5 SEO slug origin — re-investigated
+
+Of 6 999 products, **6 580 have `uriRU` set to literally the numeric
+product id** (never `NULL`, never empty — `nullUri`/`emptyUri` are both 0);
+**419 have a real, non-numeric slug.**
+
+- **All 419 real-slug products are published** (`isShown=1`); none of the
+  115 hidden products have a real slug. This alone doesn't fully explain
+  the gap, since only 115 of the 6 580 numeric-slug products are hidden —
+  the other 6 465 numeric-slug products are published too.
+- **No `created_at` boundary explains it** — real-slug and numeric-slug
+  products' `created_at` ranges overlap almost entirely.
+- **Brand concentration is the real pattern**: real slugs exist for
+  products from only **20 of 94 brands**, and the top 5 brands alone
+  account for ~81% of all 419 (104 + 99 + 62 + 48 + 27 = 340). Product id
+  range also doesn't cleanly separate the two groups (real-slug ids span
+  8–10 957; numeric-slug ids span 2–11 179).
+
+**Honest conclusion: there is no clean technical rule (date, publish state,
+or id range) behind the 419/6 999 split. The pattern is consistent with a
+one-off, brand-by-brand editorial effort to hand-curate SEO slugs for a
+handful of priority brands, never extended to the rest of the catalog —**
+i.e., legacy data-entry inconsistency, not a bug to "fix" during migration.
+This matches §7's existing preserve-vs-generate strategy: the 419 real
+slugs should be preserved as-is, and the 6 580 numeric-fallback products
+need a slug-generation decision in Phase B, not a search for a hidden rule
+that doesn't exist.
+
+### 13.6 Dry-run quarantine model
+
+`apps/api/src/import/dry-run-catalog.ts` was extended to replace the flat
+`conflicts` bucket with a structured quarantine model
+(`CatalogDryRunAction` is now `'create' | 'update' | 'quarantine'`). Every
+quarantined product carries one or more `QuarantineReasonCode` values
+(`duplicate_guid`, `invalid_brand_reference`,
+`invalid_category_reference_resolvable_via_secondary`,
+`invalid_category_reference_unresolvable`, `duplicate_sku`) — a product can
+carry more than one at once, and none is ever auto-resolved. Orphan
+`products_variable` rows get their own `quarantinedVariants` list
+(`orphan_variant`, with an optional unambiguous `possibleReattachProductId`
+per §13.4). `CatalogDryRunSummary.quarantine` aggregates counts per reason
+code plus up to 3 sanitized, non-sensitive illustrative examples per code
+(legacy id and a short note only — never a full row, price, or free-text
+field).
+
+Real run against `vizaje_catalog_only.sql` (zero database writes):
+
+| Metric | Count |
+|---|---|
+| Total legacy products | 6 999 |
+| Would create (clean) | **6 596** |
+| Would update | 0 (no `--use-db` flag; no prior mappings exist yet regardless) |
+| Products quarantined | **403** |
+| — `duplicate_guid` | 30 |
+| — `invalid_brand_reference` | 0 |
+| — `invalid_category_reference_resolvable_via_secondary` | 30 |
+| — `invalid_category_reference_unresolvable` | 3 |
+| — `duplicate_sku` | 376 |
+| Variants quarantined (`orphan_variant`) | 721 |
+
+(403 quarantined products + 6 596 clean = 6 999, confirmed. The per-reason
+counts sum to more than 403 because a product can carry multiple reason
+codes at once — e.g. several of the 14 GUID-duplicate groups' members also
+appear in a SKU-duplicate group.) `duplicate_sku` jumped from the 128 group
+count to 376 *products* because a group's size is its member count, not 1 —
+the 34-member `"1502artdeco"` group alone contributes 34 to that total.
+
+### 13.7 Is the 6 936→6 596 clean subset safe for a test import?
+
+**Partial — not a plain yes.** The quarantine model above already moved 340
+products out of Phase A's original 6 936 "would-create" figure (the 128 SKU-
+duplicate groups weren't excluded from that original number; they are now).
+What remains — **6 596 products** — is clean with respect to identity
+(GUID), reference integrity (brand/category), and the SKU-duplicate
+transformation decided in §13.3. It is **not** fully clean end to end:
+
+- **1 176 of the 6 936 pre-quarantine would-create products (≈17%) have
+  zero images** — real, not an artifact of quarantine; a test import would
+  need to tolerate imageless products (consistent with §6: no physical
+  media files are available to upload yet regardless).
+- **6 911 of 6 936 have both RU and RO titles; 25 are missing RO** — a
+  minor localization gap, not a blocker, but worth flagging rather than
+  assuming full bilingual coverage.
+- No variant-level SKU collision exists within the clean subset (checked
+  directly: 0 groups), and no clean-subset product is itself the target of
+  an orphan variant's broken `product_id` (checked directly: 0 — the
+  orphans' missing `product_id` values never collide with a real, present
+  product id).
+
+**Conclusion: the post-quarantine 6 596-product subset is safe to use as
+the basis for a future controlled *test* import (Phase B, once approved) —
+its identifiers, localizations, categories, and relationships are
+internally consistent — provided the import tooling is built to tolerate
+missing images and the occasional missing RO title rather than treating
+either as a hard failure.** The 403 quarantined products and 721 orphan
+variants remain explicitly out of scope for that first test import until
+the decisions in §13.1–§13.4 are made by a human.
+
+### 13.8 Verification (Sprint 12A.2)
+
+| Check | Result |
+|---|---|
+| TypeScript typecheck (`bunx tsc --noEmit`, `apps/api`) | **Clean**, 0 errors |
+| Migration drift (`bunx drizzle-kit generate`) | **"No schema changes, nothing to migrate"** — no Drizzle schema was touched this round |
+| Full Bun test suite (`bun test`, `apps/api`) | **364 pass, 0 fail, 15 skip** (379 total) — the 15 skips are the same pre-existing Meilisearch-unavailable skips from Phase A, unrelated to this work |
+| Real dry-run (`bun run import:legacy:catalog-dry-run -- --file=../../docs/legacy-reference/vizaje_catalog_only.sql`) | Ran to completion against the full 6 999-product file; quarantine totals match §13.6; zero rows written to any catalog table |
+| `apps/api/tests/import-dry-run-catalog.test.ts` | Extended from 9 to 20 tests — new coverage for each `QuarantineReasonCode`, multi-reason products, example-list capping, orphan-variant quarantine (including ambiguous/unmatched reattachment), and the zero-write guarantee with orphan variants present |
+
+No real catalog row was imported into PostgreSQL, no new Drizzle migration
+was applied, no file was uploaded to R2, no legacy source file was modified,
+and `apps/web`'s mock data was not touched, per Sprint 12A.2's restrictions.
+Phase B was not started.
