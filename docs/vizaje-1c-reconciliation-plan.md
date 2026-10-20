@@ -329,3 +329,139 @@ instruction) was deliberately not added.
 
 No PostgreSQL writes. No `external_entity_mappings` mutations. No Phase B
 work started or implied.
+
+## 7. Sprint 12A.4 — running this locally on your Mac
+
+Sprint 12A.4 added a new entrypoint,
+`apps/api/src/import/cli/reconcile-1c-local.ts`, that accepts **explicit
+local file paths** instead of hardcoded repo paths, so it can be run
+directly against the real files on your machine - none of which exist in
+this repository or in the cloud sandbox this project is normally developed
+in. Nothing in this sprint was run against your real files; every test and
+the one smoke run described above used synthetic fixtures shaped like the
+real field layout recorded in `docs/legacy-audit/vizaje-1c-audit.{md,json}`
+(Sprint 12A.3's aggregate-only audit).
+
+**New in this sprint:**
+
+- `apps/api/src/import/cli/reconcile-1c-local.ts` - the local CLI described below.
+- `apps/api/src/import/parsers/json-array-stream.ts` - a bounded-memory
+  streaming parser for a top-level JSON array file, used to read the (large)
+  real `products.json`/`old_products.json`/`pricevn.json`/`JobVN.json` one
+  element at a time during the parse step, rather than holding the whole
+  raw file text and the whole parse tree in memory simultaneously. See that
+  file's own doc comment for the precise, honest scope of what is and
+  isn't actually streamed - the final matching step still needs the full
+  record set in memory, which is inherent to how `reconcileSqlWith1c`'s
+  indexes work, not something this parser can avoid.
+- `apps/api/src/import/reconcile/duplicate-id-nom.ts` - classifies every
+  duplicate-`ID_nom` group found in a real 1C file into one of four
+  categories (`identical`, `conflicting`, `mutable_only`,
+  `variant_or_warehouse`) - see §4 above for the reasoning. Never reports
+  raw field values, only field *names* that differ.
+- `apps/api/src/import/reconcile/secondary-source-rescue.ts` -
+  `old_products.json` wiring: a product the primary `products.json` pass
+  left `unmatched` can be evidenced (not resolved) by a match in
+  `old_products.json`. This is reported as a separate, clearly-labeled
+  section - never merged into the primary counts, and never able to clear
+  a Sprint 12A.2 quarantine.
+- `reconcileSqlWith1c` itself (Sprint 12A.3) was **not modified** - barcode
+  remains supporting evidence only (an independent signal checked
+  regardless of GUID/ID_nom, never short-circuiting or overriding a GUID
+  match on its own; see that file's own `matchProduct()` for the
+  unmodified logic), and `VariativeNomenclature`-based grouping only ever
+  promotes to a record-level match when both sides resolve to exactly one
+  candidate - unchanged from Sprint 12A.3.
+
+### Setup (once)
+
+```bash
+# From anywhere - clone if you haven't already:
+git clone https://github.com/arionel0726-dev/new-brand.git
+cd new-brand
+git checkout claude/trusting-ride-faubis
+git pull
+
+# Bun (if not already installed):
+curl -fsSL https://bun.sh/install | bash
+
+# Install dependencies:
+cd apps/api
+bun install
+
+# A local Postgres is required only for the catalog dry-run's quarantine
+# lookup (read-only SELECT against external_entity_mappings) and for
+# running the test suite - it is never written to by the reconciliation
+# CLI itself. If you don't already have one:
+#   brew install postgresql@16
+#   brew services start postgresql@16
+#   createdb beauty_store_test
+# Then point apps/api/.env's DATABASE_URL at it, e.g.:
+#   DATABASE_URL=postgres://localhost:5432/beauty_store_test
+# and apply migrations once:
+bun run db:migrate
+```
+
+### Running the reconciliation
+
+Replace the paths below with wherever your real files actually live
+(the user's own paths, by way of example):
+
+```bash
+cd new-brand/apps/api
+
+bun run import:legacy:reconcile-1c-local -- \
+  --sql="$HOME/path/to/your/legacy_dump.sql" \
+  --products="$HOME/Downloads/b2b-patch/public/import/products.json" \
+  --old-products="$HOME/Downloads/b2b-patch/public/import/old_products.json" \
+  --pricevn="$HOME/Downloads/b2b-patch/public/import/pricevn.json" \
+  --jobvn="$HOME/Downloads/b2b-patch/public/import/JobVN.json"
+```
+
+`--sql` and `--products` are required; `--old-products`, `--pricevn`, and
+`--jobvn` are each optional and only add their own report section when
+supplied. To save the full output to a file for later review:
+
+```bash
+bun run import:legacy:reconcile-1c-local -- \
+  --sql="$HOME/path/to/your/legacy_dump.sql" \
+  --products="$HOME/Downloads/b2b-patch/public/import/products.json" \
+  --old-products="$HOME/Downloads/b2b-patch/public/import/old_products.json" \
+  --pricevn="$HOME/Downloads/b2b-patch/public/import/pricevn.json" \
+  --jobvn="$HOME/Downloads/b2b-patch/public/import/JobVN.json" \
+  2>&1 | tee ~/vizaje-reconciliation-run-$(date +%Y%m%d-%H%M%S).log
+```
+
+### What the report contains
+
+Printed to stdout, in this order:
+
+1. **Primary reconciliation summary** (products.json) - `confirmed` /
+   `ambiguous` / `unmatched` / `quarantine` counts, a breakdown by which
+   key matched (`guid_id_nom` / `barcode` / `variative_nomenclature_group`),
+   and a bounded number of sanitized examples per outcome.
+2. **Unmatched 1C records** - a sample (up to 10) of `products.json`
+   records with no MySQL match on any key.
+3. **Duplicate `ID_nom` classification: products.json** - counts by
+   `identical` / `conflicting` / `mutable_only` / `variant_or_warehouse`,
+   plus a bounded number of examples (ids, record counts, and differing
+   field *names* only).
+4. *(if `--old-products` given)* **Secondary reconciliation via
+   old_products.json** - how many primary-unmatched products this
+   stale-snapshot source offers additional (non-authoritative) evidence
+   for, plus its own duplicate-`ID_nom` classification.
+5. *(if `--pricevn` given)* **pricevn.json** duplicate-`ID_nom`
+   classification and ID_nom coverage of the SQL-matched set.
+6. *(if `--jobvn` given)* **JobVN.json** duplicate-`ID_nom` classification
+   and ID_nom coverage of the SQL-matched set.
+7. **Quarantined variants** - the Sprint 12A.2 orphan-variant totals by
+   reason code, unchanged by this run.
+8. **Remaining Phase B blockers** - a short reminder of what still needs a
+   human decision (the 3 uncategorizable products, the `product_id=1`
+   orphan cluster, the SKU-duplicate variant-restructuring approach, and
+   whatever this specific run's duplicate-`ID_nom` classification turned
+   up).
+
+Nothing is written to PostgreSQL, nothing mutates
+`external_entity_mappings`, and no file under `docs/legacy-reference/` or
+`docs/legacy-audit/` is ever touched by this tool.

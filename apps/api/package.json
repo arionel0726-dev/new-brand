@@ -10,6 +10,7 @@
     "import:legacy:dry-run": "bun run src/import/cli/dry-run.ts",
     "import:legacy:catalog-dry-run": "bun run src/import/cli/catalog-dry-run.ts",
     "import:legacy:reconcile-1c": "bun run src/import/cli/reconcile-1c.ts",
+    "import:legacy:reconcile-1c-local": "bun run src/import/cli/reconcile-1c-local.ts",
     "test": "bun test"
   },
   "dependencies": {
