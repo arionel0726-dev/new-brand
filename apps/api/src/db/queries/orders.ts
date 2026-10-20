@@ -1,13 +1,17 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { and, asc, desc, eq, sql } from 'drizzle-orm'
-import { db, type Database } from '../client'
+import { db } from '../client'
+import type { DbOrTx, Tx } from '../tx'
 import { generateOrderNumber } from '../../orders/order-number'
 import { canTransitionOrderStatus } from '../../orders/status'
 import { InsufficientStockError, reserveOrderInventory, releaseOrderInventory } from '../../orders/inventory'
+import { computeShipping } from '../../checkout/shipping'
 import { AppError } from '../../middleware/error-handler'
 import type { Pagination } from '../../lib/pagination'
+import { getPaymentProvider, isOnlinePaymentsConfigured } from '../../payments/provider'
 import { carts, cartItems } from '../schema/carts'
 import { inventory } from '../schema/inventory'
+import type { PaymentMethod } from '../schema/payment-method'
 import {
 	orderAccessTokens,
 	orderIdempotencyKeys,
@@ -18,10 +22,7 @@ import {
 import { productPrices } from '../schema/product-prices'
 import { productVariants } from '../schema/product-variants'
 import { products } from '../schema/products'
-
-type Tx = Parameters<Parameters<Database['transaction']>[0]>[0]
-/** Either the plain db client (read-only use, e.g. checkout preview) or an open transaction (order creation/cancellation). */
-type DbOrTx = Database | Tx
+import { createPayment } from './payments'
 
 export type OrderRow = typeof orders.$inferSelect
 export type OrderItemRow = typeof orderItems.$inferSelect
@@ -131,12 +132,28 @@ export async function verifyOrderAccessToken(orderId: string, rawToken: string):
 	return timingSafeEqual(candidate, stored)
 }
 
+export type DeliveryInput =
+	| { method: 'pickup'; pickupLocationId: string }
+	| {
+			method: 'courier'
+			deliveryZoneId: string
+			recipientName: string
+			recipientPhone: string
+			city: string
+			street: string
+			house: string
+			apartment: string | null
+			notes: string | null
+	  }
+
 export type CreateOrderInput = {
 	identityKey: string
 	idempotencyKey: string
 	requestHash: string
 	cartOwner: CartOwnerIdentity
 	customer: { name: string; email: string; phone: string; note: string | null }
+	delivery: DeliveryInput
+	paymentMethod: PaymentMethod
 }
 
 export type CreateOrderResult =
@@ -204,6 +221,15 @@ export async function createOrderFromCart(input: CreateOrderInput): Promise<Crea
 			return { outcome: 'replayed', order }
 		}
 
+		// Rejected before touching the cart or inventory at all - online
+		// payments are unavailable until a real provider is implemented and
+		// configured (Task 4). This is defense-in-depth: the route layer
+		// rejects 'online' first, and UnavailableOnlineProvider itself would
+		// also refuse below either way.
+		if (input.paymentMethod === 'online' && !isOnlinePaymentsConfigured()) {
+			throw new AppError('Online payment is not currently available', 422, 'online_payment_unavailable')
+		}
+
 		const cart = await selectCartForUpdate(tx, input.cartOwner)
 		if (!cart) {
 			throw new AppError('Your cart is empty', 422, 'cart_empty')
@@ -241,7 +267,20 @@ export async function createOrderFromCart(input: CreateOrderInput): Promise<Crea
 
 		const subtotalAmount = lines.reduce((sum, line) => sum + (line.price ?? 0) * line.quantity, 0)
 		const discountAmount = 0
-		const shippingAmount = 0
+
+		// Recomputed here, inside this same transaction, from the subtotal
+		// just computed above - a shipping-quote response the client holds
+		// from an earlier call is never trusted (Task 3).
+		const shippingSelection =
+			input.delivery.method === 'pickup'
+				? ({ method: 'pickup', pickupLocationId: input.delivery.pickupLocationId } as const)
+				: ({ method: 'courier', deliveryZoneId: input.delivery.deliveryZoneId } as const)
+		const shipping = await computeShipping(tx, shippingSelection, subtotalAmount)
+		if (!shipping.ok) {
+			throw new AppError(shipping.message, 422, shipping.code, { minOrderAmount: shipping.minOrderAmount })
+		}
+
+		const shippingAmount = shipping.fee
 		const totalAmount = subtotalAmount - discountAmount + shippingAmount
 
 		const order = await insertOrderWithUniqueNumber(tx, {
@@ -254,7 +293,35 @@ export async function createOrderFromCart(input: CreateOrderInput): Promise<Crea
 			customerName: input.customer.name,
 			customerEmail: input.customer.email,
 			customerPhone: input.customer.phone,
-			customerNote: input.customer.note
+			customerNote: input.customer.note,
+			deliveryMethod: input.delivery.method,
+			paymentMethod: input.paymentMethod,
+			...(input.delivery.method === 'pickup'
+				? { pickupLocationId: input.delivery.pickupLocationId }
+				: {
+						deliveryZoneId: input.delivery.deliveryZoneId,
+						recipientName: input.delivery.recipientName,
+						recipientPhone: input.delivery.recipientPhone,
+						deliveryCity: input.delivery.city,
+						deliveryStreet: input.delivery.street,
+						deliveryHouse: input.delivery.house,
+						deliveryApartment: input.delivery.apartment,
+						deliveryNotes: input.delivery.notes
+					})
+		})
+
+		const provider = getPaymentProvider(input.paymentMethod)
+		const initiated = await provider.initiatePayment({
+			orderId: order.id,
+			amount: totalAmount,
+			currency: 'MDL'
+		})
+		await createPayment(tx, {
+			orderId: order.id,
+			method: input.paymentMethod,
+			amount: totalAmount,
+			provider: provider.code,
+			externalReference: initiated.externalReference
 		})
 
 		await tx.insert(orderItems).values(

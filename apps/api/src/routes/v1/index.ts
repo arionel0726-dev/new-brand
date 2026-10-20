@@ -5,6 +5,7 @@ import { brandsRoute } from './brands'
 import { cartRoute } from './cart'
 import { categoriesRoute } from './categories'
 import { checkoutRoute } from './checkout'
+import { deliveryRoute } from './delivery'
 import { ordersRoute } from './orders'
 import { productsRoute } from './products'
 import { searchRoute } from './search'
@@ -20,5 +21,6 @@ export const v1Route = new Hono<{ Variables: AuthVariables }>()
 	.route('/wishlist', wishlistRoute)
 	.route('/checkout', checkoutRoute)
 	.route('/orders', ordersRoute)
+	.route('/delivery', deliveryRoute)
 
 export type V1RouteType = typeof v1Route

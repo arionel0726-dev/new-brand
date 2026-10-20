@@ -75,6 +75,21 @@ async function createSellableProduct(cookie: string, quantityOnHand = 10) {
 	return { product, variant }
 }
 
+async function createPickupLocation(cookie: string) {
+	const suffix = crypto.randomUUID().slice(0, 8)
+	const res = await requestJson('/api/v1/admin/pickup-locations', {
+		method: 'POST',
+		headers: { Cookie: cookie },
+		body: JSON.stringify({
+			code: `loc-${suffix}`,
+			nameRu: 'Магазин',
+			nameRo: 'Magazin',
+			address: 'Str. Test 1, Chisinau'
+		})
+	})
+	return res.body.data
+}
+
 async function getGuestCookie(): Promise<string> {
 	const res = await requestJson('/api/v1/cart')
 	return extractCookieHeader(res.headers)
@@ -97,11 +112,17 @@ function orderHeaders(cookie: string, idempotencyKey = crypto.randomUUID()) {
 	return { Cookie: cookie, 'Idempotency-Key': idempotencyKey }
 }
 
-const CUSTOMER_PAYLOAD = {
-	customerName: 'Maria Popescu',
-	customerEmail: 'maria@example.com',
-	customerPhone: '069123456',
-	customerNote: 'Leave at the door'
+/** A pending order always needs a real, active pickup location to reference. */
+function customerPayload(pickupLocationId: string, overrides: Record<string, unknown> = {}) {
+	return {
+		customerName: 'Maria Popescu',
+		customerEmail: 'maria@example.com',
+		customerPhone: '069123456',
+		customerNote: 'Leave at the door',
+		delivery: { method: 'pickup', pickupLocationId },
+		paymentMethod: 'cash_on_delivery',
+		...overrides
+	}
 }
 
 describe('checkout preview', () => {
@@ -232,14 +253,6 @@ describe('checkout preview', () => {
 				body: JSON.stringify({ sku: `SKU-${suffix}` })
 			})
 		).body.data
-		// No price set, and no publish attempt - this variant simply has no
-		// price row at all, which the cart layer still allows adding (cart
-		// sellability check mirrors this one) only once priced; so we add it
-		// directly to the cart's table state is not possible via the API
-		// without a price. Instead, verify the preview on a cart item whose
-		// price gets deleted isn't reachable via the admin API either - so
-		// this scenario is exercised at the unit level via inactive/archived
-		// cases above, and here we confirm initAdd itself is refused.
 		const guestCookie = await getGuestCookie()
 		const addRes = await requestJson('/api/v1/cart/items', {
 			method: 'POST',
@@ -270,13 +283,14 @@ describe('order creation', () => {
 	test('requires an Idempotency-Key header', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id)
 
 		const res = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: { Cookie: guestCookie },
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 		expect(res.status).toBe(400)
 		expect(res.body.error.code).toBe('idempotency_key_required')
@@ -285,13 +299,14 @@ describe('order creation', () => {
 	test('creates a guest order and reserves stock without touching quantity_on_hand', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff, 10)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id, 3)
 
 		const res = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 
 		expect(res.status).toBe(201)
@@ -300,6 +315,10 @@ describe('order creation', () => {
 		expect(res.body.data.orderNumber).toMatch(/^ORD-/)
 		expect(res.body.data.accessToken).toBeTruthy()
 		expect(res.body.data.customerPhone).toBe('+37369123456')
+		expect(res.body.data.delivery).toEqual({ method: 'pickup', pickupLocationId: pickup.id })
+		expect(res.body.data.payments).toHaveLength(1)
+		expect(res.body.data.payments[0].status).toBe('pending')
+		expect(res.body.data.payments[0].amount).toBe(19999 * 3)
 
 		const inv = await getInventory(variant.id)
 		expect(inv.quantityOnHand).toBe(10)
@@ -313,13 +332,14 @@ describe('order creation', () => {
 	test('creates an authenticated order tied to the customer\'s account, no access token issued', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const { cookie: customerCookie } = await createSessionAs('customer')
 		await addToCart(customerCookie, variant.id, 1)
 
 		const res = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(customerCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 
 		expect(res.status).toBe(201)
@@ -333,39 +353,80 @@ describe('order creation', () => {
 	test('rejects an invalid phone number', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id)
 
 		const res = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify({ ...CUSTOMER_PAYLOAD, customerPhone: '123' })
+			body: JSON.stringify(customerPayload(pickup.id, { customerPhone: '123' }))
 		})
 		expect(res.status).toBe(400)
 		expect(res.body.error.code).toBe('invalid_phone')
 	})
 
 	test('rejects an empty cart', async () => {
+		const staff = await staffCookie()
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		const res = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 		expect(res.status).toBe(422)
 		expect(res.body.error.code).toBe('cart_empty')
 	})
 
+	test('rejects an inactive pickup location', async () => {
+		const staff = await staffCookie()
+		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
+		await requestJson(`/api/v1/admin/pickup-locations/${pickup.id}`, {
+			method: 'PATCH',
+			headers: { Cookie: staff },
+			body: JSON.stringify({ isActive: false })
+		})
+		const guestCookie = await getGuestCookie()
+		await addToCart(guestCookie, variant.id)
+
+		const res = await requestJson('/api/v1/orders', {
+			method: 'POST',
+			headers: orderHeaders(guestCookie),
+			body: JSON.stringify(customerPayload(pickup.id))
+		})
+		expect(res.status).toBe(422)
+		expect(res.body.error.code).toBe('pickup_location_inactive')
+	})
+
+	test('rejects online payment while no provider is configured', async () => {
+		const staff = await staffCookie()
+		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
+		const guestCookie = await getGuestCookie()
+		await addToCart(guestCookie, variant.id)
+
+		const res = await requestJson('/api/v1/orders', {
+			method: 'POST',
+			headers: orderHeaders(guestCookie),
+			body: JSON.stringify(customerPayload(pickup.id, { paymentMethod: 'online' }))
+		})
+		expect(res.status).toBe(422)
+		expect(res.body.error.code).toBe('online_payment_unavailable')
+	})
+
 	test('writes a correct order_items snapshot, independent of later catalog changes', async () => {
 		const staff = await staffCookie()
 		const { product, variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id, 2)
 
 		const created = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 		const orderId = created.body.data.id
 		const accessToken = created.body.data.accessToken
@@ -393,6 +454,7 @@ describe('order creation', () => {
 	test('rolls back entirely when reservation fails - no order, no partial items', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff, 1)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id, 1)
 
@@ -406,7 +468,7 @@ describe('order creation', () => {
 		const res = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 		expect(res.status).toBe(409)
 		expect(res.body.error.code).toBe('insufficient_stock')
@@ -423,13 +485,14 @@ describe('order creation', () => {
 	test('records the initial status history row on creation', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id)
 
 		const created = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 
 		const history = await db
@@ -446,14 +509,16 @@ describe('idempotency', () => {
 	test('a repeated request with the same key returns the same order, without reserving twice', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff, 10)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id, 2)
 
 		const key = crypto.randomUUID()
+		const payload = customerPayload(pickup.id)
 		const first = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie, key),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(payload)
 		})
 		expect(first.status).toBe(201)
 
@@ -464,7 +529,7 @@ describe('idempotency', () => {
 		const second = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie, key),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(payload)
 		})
 
 		expect(second.status).toBe(200)
@@ -481,6 +546,7 @@ describe('idempotency', () => {
 	test('the same key with a different payload is a conflict', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id)
 
@@ -488,13 +554,37 @@ describe('idempotency', () => {
 		await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie, key),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 
 		const second = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie, key),
-			body: JSON.stringify({ ...CUSTOMER_PAYLOAD, customerName: 'Different Person' })
+			body: JSON.stringify(customerPayload(pickup.id, { customerName: 'Different Person' }))
+		})
+
+		expect(second.status).toBe(409)
+		expect(second.body.error.code).toBe('idempotency_key_conflict')
+	})
+
+	test('the same key with a different payment method is a conflict', async () => {
+		const staff = await staffCookie()
+		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
+		const guestCookie = await getGuestCookie()
+		await addToCart(guestCookie, variant.id)
+
+		const key = crypto.randomUUID()
+		await requestJson('/api/v1/orders', {
+			method: 'POST',
+			headers: orderHeaders(guestCookie, key),
+			body: JSON.stringify(customerPayload(pickup.id, { paymentMethod: 'cash_on_delivery' }))
+		})
+
+		const second = await requestJson('/api/v1/orders', {
+			method: 'POST',
+			headers: orderHeaders(guestCookie, key),
+			body: JSON.stringify(customerPayload(pickup.id, { paymentMethod: 'card_on_delivery' }))
 		})
 
 		expect(second.status).toBe(409)
@@ -504,16 +594,18 @@ describe('idempotency', () => {
 	test('concurrent requests with the same key create exactly one order', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff, 50)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id, 2)
 
 		const key = crypto.randomUUID()
+		const payload = customerPayload(pickup.id)
 		const results = await Promise.all(
 			Array.from({ length: 5 }, () =>
 				requestJson('/api/v1/orders', {
 					method: 'POST',
 					headers: orderHeaders(guestCookie, key),
-					body: JSON.stringify(CUSTOMER_PAYLOAD)
+					body: JSON.stringify(payload)
 				})
 			)
 		)
@@ -531,22 +623,24 @@ describe('concurrent checkout under limited stock', () => {
 	test('two different shoppers racing for the last unit: exactly one order wins, no overselling', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff, 1)
+		const pickup = await createPickupLocation(staff)
 
 		const guestA = await getGuestCookie()
 		const guestB = await getGuestCookie()
 		await addToCart(guestA, variant.id, 1)
 		await addToCart(guestB, variant.id, 1)
 
+		const payload = customerPayload(pickup.id)
 		const [resA, resB] = await Promise.all([
 			requestJson('/api/v1/orders', {
 				method: 'POST',
 				headers: orderHeaders(guestA),
-				body: JSON.stringify(CUSTOMER_PAYLOAD)
+				body: JSON.stringify(payload)
 			}),
 			requestJson('/api/v1/orders', {
 				method: 'POST',
 				headers: orderHeaders(guestB),
-				body: JSON.stringify(CUSTOMER_PAYLOAD)
+				body: JSON.stringify(payload)
 			})
 		])
 
@@ -566,12 +660,13 @@ describe('order access control', () => {
 	test('one customer cannot fetch another customer\'s order', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const { cookie: ownerCookie } = await createSessionAs('customer')
 		await addToCart(ownerCookie, variant.id)
 		const created = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(ownerCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 
 		const { cookie: strangerCookie } = await createSessionAs('customer')
@@ -584,12 +679,13 @@ describe('order access control', () => {
 	test('a guest order is only reachable with its own access token', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id)
 		const created = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 		const orderId = created.body.data.id
 		const accessToken = created.body.data.accessToken
@@ -614,12 +710,13 @@ describe('cancellation', () => {
 	test('cancels a pending order and releases the reservation', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff, 10)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id, 4)
 		const created = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 		const orderId = created.body.data.id
 		const accessToken = created.body.data.accessToken
@@ -643,12 +740,13 @@ describe('cancellation', () => {
 	test('a second cancellation does not release the reservation again (409, no negative stock)', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff, 10)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id, 3)
 		const created = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 		const orderId = created.body.data.id
 		const accessToken = created.body.data.accessToken
@@ -676,12 +774,13 @@ describe('cancellation', () => {
 	test('records a status history row for the cancellation', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const guestCookie = await getGuestCookie()
 		await addToCart(guestCookie, variant.id)
 		const created = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(guestCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 		const accessToken = created.body.data.accessToken
 
@@ -703,12 +802,13 @@ describe('cancellation', () => {
 	test('a stranger cannot cancel someone else\'s order', async () => {
 		const staff = await staffCookie()
 		const { variant } = await createSellableProduct(staff)
+		const pickup = await createPickupLocation(staff)
 		const { cookie: ownerCookie } = await createSessionAs('customer')
 		await addToCart(ownerCookie, variant.id)
 		const created = await requestJson('/api/v1/orders', {
 			method: 'POST',
 			headers: orderHeaders(ownerCookie),
-			body: JSON.stringify(CUSTOMER_PAYLOAD)
+			body: JSON.stringify(customerPayload(pickup.id))
 		})
 
 		const { cookie: strangerCookie } = await createSessionAs('customer')
@@ -724,6 +824,7 @@ describe('cancellation', () => {
 describe('order list pagination', () => {
 	test('paginates a customer\'s own orders, newest first', async () => {
 		const staff = await staffCookie()
+		const pickup = await createPickupLocation(staff)
 		const { cookie: customerCookie } = await createSessionAs('customer')
 
 		for (let i = 0; i < 3; i++) {
@@ -732,7 +833,7 @@ describe('order list pagination', () => {
 			await requestJson('/api/v1/orders', {
 				method: 'POST',
 				headers: orderHeaders(customerCookie),
-				body: JSON.stringify(CUSTOMER_PAYLOAD)
+				body: JSON.stringify(customerPayload(pickup.id))
 			})
 		}
 

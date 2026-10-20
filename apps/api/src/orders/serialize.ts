@@ -1,4 +1,5 @@
 import type { OrderItemRow, OrderRow } from '../db/queries/orders'
+import type { PaymentRow } from '../db/queries/payments'
 import { localize, type Locale } from '../lib/locale'
 
 export function serializeOrderItem(item: OrderItemRow, lang: Locale) {
@@ -15,7 +16,47 @@ export function serializeOrderItem(item: OrderItemRow, lang: Locale) {
 	}
 }
 
-export function serializeOrder(order: OrderRow, items: OrderItemRow[] | undefined, lang: Locale) {
+export function serializePayment(payment: PaymentRow) {
+	return {
+		id: payment.id,
+		method: payment.method,
+		status: payment.status,
+		amount: payment.amount,
+		refundedAmount: payment.refundedAmount,
+		currency: payment.currency,
+		provider: payment.provider,
+		createdAt: payment.createdAt,
+		updatedAt: payment.updatedAt
+	}
+}
+
+function serializeDelivery(order: OrderRow) {
+	if (order.deliveryMethod === 'pickup') {
+		return { method: 'pickup' as const, pickupLocationId: order.pickupLocationId }
+	}
+	if (order.deliveryMethod === 'courier') {
+		return {
+			method: 'courier' as const,
+			deliveryZoneId: order.deliveryZoneId,
+			recipientName: order.recipientName,
+			recipientPhone: order.recipientPhone,
+			city: order.deliveryCity,
+			street: order.deliveryStreet,
+			house: order.deliveryHouse,
+			apartment: order.deliveryApartment,
+			notes: order.deliveryNotes
+		}
+	}
+	// A Sprint 6 order, created before delivery existed - still readable.
+	return null
+}
+
+export function serializeOrder(
+	order: OrderRow,
+	items: OrderItemRow[] | undefined,
+	lang: Locale,
+	payments?: PaymentRow[]
+) {
 	return {
 		id: order.id,
 		orderNumber: order.orderNumber,
@@ -29,9 +70,9 @@ export function serializeOrder(order: OrderRow, items: OrderItemRow[] | undefine
 		customerEmail: order.customerEmail,
 		customerPhone: order.customerPhone,
 		customerNote: order.customerNote,
-		// Always null in Sprint 6 - see src/db/schema/orders.ts.
-		deliveryMethod: order.deliveryMethod,
 		paymentMethod: order.paymentMethod,
+		delivery: serializeDelivery(order),
+		payments: payments?.map(serializePayment),
 		items: items?.map(item => serializeOrderItem(item, lang)),
 		createdAt: order.createdAt,
 		updatedAt: order.updatedAt,

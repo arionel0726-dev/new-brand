@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm'
 import { check, index, integer, pgEnum, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core'
 import { user } from './auth'
+import { deliveryMethodEnum, deliveryZones, pickupLocations } from './delivery'
+import { paymentMethodEnum } from './payment-method'
 import { products } from './products'
 import { productVariants } from './product-variants'
 
@@ -41,12 +43,26 @@ export const orders = pgTable(
 		customerEmail: text('customer_email').notNull(),
 		customerPhone: text('customer_phone').notNull(),
 		customerNote: text('customer_note'),
-		// Both present but unused and always null in Sprint 6 - real delivery
-		// and payment methods land in Sprint 7. Having the columns now means
-		// that sprint doesn't need its own migration just to start writing to
-		// them, without this sprint pretending to implement either.
-		deliveryMethod: text('delivery_method'),
-		paymentMethod: text('payment_method'),
+		// Sprint 6 left these as plain nullable text with every row NULL;
+		// Sprint 7 narrows them to real enums (a safe ALTER COLUMN TYPE - every
+		// existing value is NULL, which casts to NULL in either type).
+		deliveryMethod: deliveryMethodEnum('delivery_method'),
+		paymentMethod: paymentMethodEnum('payment_method'),
+		// Pickup: set together with pickupLocationId, nothing else below.
+		pickupLocationId: uuid('pickup_location_id').references(() => pickupLocations.id, { onDelete: 'set null' }),
+		// Courier: set together with deliveryZoneId and every recipient field.
+		// These are the address *snapshot* at order time - never a live
+		// reference into a shared, editable address book (this project has
+		// none), so a shopper editing their profile later can never alter a
+		// past order's delivery details.
+		deliveryZoneId: uuid('delivery_zone_id').references(() => deliveryZones.id, { onDelete: 'set null' }),
+		recipientName: text('recipient_name'),
+		recipientPhone: text('recipient_phone'),
+		deliveryCity: text('delivery_city'),
+		deliveryStreet: text('delivery_street'),
+		deliveryHouse: text('delivery_house'),
+		deliveryApartment: text('delivery_apartment'),
+		deliveryNotes: text('delivery_notes'),
 		createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 		updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 		cancelledAt: timestamp('cancelled_at', { withTimezone: true })
@@ -62,6 +78,27 @@ export const orders = pgTable(
 		check(
 			'orders_total_consistency_check',
 			sql`${table.totalAmount} = ${table.subtotalAmount} - ${table.discountAmount} + ${table.shippingAmount}`
+		),
+		// Exactly one coherent delivery shape: no delivery info at all
+		// (every Sprint 6 order, and still a valid state), a complete pickup
+		// selection, or a complete courier selection - never a mix, and
+		// never a partial one.
+		check(
+			'orders_delivery_shape_check',
+			sql`
+				(${table.deliveryMethod} is null
+					and ${table.pickupLocationId} is null and ${table.deliveryZoneId} is null
+					and ${table.recipientName} is null and ${table.recipientPhone} is null
+					and ${table.deliveryCity} is null and ${table.deliveryStreet} is null and ${table.deliveryHouse} is null)
+				or (${table.deliveryMethod} = 'pickup'
+					and ${table.pickupLocationId} is not null and ${table.deliveryZoneId} is null
+					and ${table.recipientName} is null and ${table.recipientPhone} is null
+					and ${table.deliveryCity} is null and ${table.deliveryStreet} is null and ${table.deliveryHouse} is null)
+				or (${table.deliveryMethod} = 'courier'
+					and ${table.pickupLocationId} is null and ${table.deliveryZoneId} is not null
+					and ${table.recipientName} is not null and ${table.recipientPhone} is not null
+					and ${table.deliveryCity} is not null and ${table.deliveryStreet} is not null and ${table.deliveryHouse} is not null)
+			`
 		)
 	]
 )

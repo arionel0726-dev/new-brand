@@ -56,6 +56,8 @@ export async function resetDatabase() {
 			carts,
 			wishlist_items,
 			orders,
+			delivery_zones,
+			pickup_locations,
 			product_variants,
 			products,
 			categories,
