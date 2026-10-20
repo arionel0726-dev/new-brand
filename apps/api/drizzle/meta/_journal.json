@@ -85,6 +85,13 @@
       "when": 1792499173005,
       "tag": "0011_famous_bishop",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792506145510,
+      "tag": "0012_clever_squirrel_girl",
+      "breakpoints": true
     }
   ]
 }

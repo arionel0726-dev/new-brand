@@ -65,7 +65,10 @@ export async function resetDatabase() {
 			media_pending_deletions,
 			promotions,
 			coupons,
-			collections
+			collections,
+			external_entity_mappings,
+			import_runs,
+			import_record_issues
 		restart identity cascade
 	`)
 }
