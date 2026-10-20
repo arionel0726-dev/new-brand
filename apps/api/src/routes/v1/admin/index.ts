@@ -3,6 +3,8 @@ import type { AuthVariables } from '../../../auth/middleware'
 import { requireRole } from '../../../auth/middleware'
 import { adminBrandsRoute } from './brands'
 import { adminCategoriesRoute } from './categories'
+import { adminImagesRoute } from './images'
+import { adminMediaRoute } from './media'
 import { adminProductsRoute } from './products'
 import { adminVariantsRoute } from './variants'
 
@@ -24,5 +26,7 @@ export const adminRoute = new Hono<{ Variables: AuthVariables }>()
 	.route('/categories', adminCategoriesRoute)
 	.route('/products', adminProductsRoute)
 	.route('/variants', adminVariantsRoute)
+	.route('/media', adminMediaRoute)
+	.route('/images', adminImagesRoute)
 
 export type AdminRouteType = typeof adminRoute

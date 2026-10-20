@@ -6,9 +6,12 @@
     "db:migrate": "bun run src/db/migrate.ts",
     "search:reindex": "bun run src/search/reindex.ts",
     "auth:set-role": "bun run src/auth/set-role.ts",
+    "media:cleanup": "bun run src/media/cleanup.ts",
     "test": "bun test"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1153.0",
+    "@aws-sdk/s3-request-presigner": "^3.1153.0",
     "@hono/zod-validator": "^0.9.1",
     "better-auth": "^1.7.11",
     "dotenv": "^18.0.8",

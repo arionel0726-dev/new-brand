@@ -56,7 +56,8 @@ export async function resetDatabase() {
 			product_variants,
 			products,
 			categories,
-			brands
+			brands,
+			media_pending_deletions
 		restart identity cascade
 	`)
 }

@@ -13,6 +13,11 @@ import {
 	updateProduct,
 	type ProductRow
 } from '../../../db/queries/admin-products'
+import {
+	listImagesForProduct,
+	reorderImages,
+	type ImageRow
+} from '../../../db/queries/admin-images'
 import { fetchCategoriesForProducts } from '../../../db/queries/products'
 import { buildPageMeta, paginationSchema } from '../../../lib/pagination'
 import { okWithMeta, ok } from '../../../lib/respond'
@@ -54,6 +59,10 @@ const createVariantSchema = z.object({
 	sortOrder: z.number().int().optional()
 })
 
+const reorderImagesSchema = z.object({
+	order: z.array(z.uuid()).min(1)
+})
+
 function serializeProduct(product: ProductRow, categoryIds: string[]) {
 	return {
 		id: product.id,
@@ -67,6 +76,23 @@ function serializeProduct(product: ProductRow, categoryIds: string[]) {
 		categoryIds,
 		createdAt: product.createdAt,
 		updatedAt: product.updatedAt
+	}
+}
+
+function serializeImage(image: ImageRow) {
+	return {
+		id: image.id,
+		productId: image.productId,
+		variantId: image.variantId,
+		url: image.url,
+		mimeType: image.mimeType,
+		fileSize: image.fileSize,
+		width: image.width,
+		height: image.height,
+		altRu: image.altRu,
+		altRo: image.altRo,
+		sortOrder: image.sortOrder,
+		createdAt: image.createdAt
 	}
 }
 
@@ -177,6 +203,42 @@ export const adminProductsRoute = new Hono<{ Variables: AuthVariables }>()
 				}),
 				201
 			)
+		}
+	)
+	.get('/:id/images', validateParam(idParamSchema), async c => {
+		const { id } = c.req.valid('param')
+		const product = await getAdminProductById(id)
+		if (!product) throw new AppError('Product not found', 404, 'product_not_found')
+
+		const images = await listImagesForProduct(id)
+		return ok(c, images.map(serializeImage))
+	})
+	.put(
+		'/:id/images/order',
+		validateParam(idParamSchema),
+		validateJson(reorderImagesSchema),
+		async c => {
+			const { id } = c.req.valid('param')
+			const { order } = c.req.valid('json')
+
+			const product = await getAdminProductById(id)
+			if (!product) throw new AppError('Product not found', 404, 'product_not_found')
+
+			try {
+				await reorderImages(id, order)
+			} catch (error) {
+				if (error instanceof Error && error.message === 'ORDER_MISMATCH') {
+					throw new AppError(
+						'The provided image ids do not exactly match this product\'s images',
+						400,
+						'image_order_mismatch'
+					)
+				}
+				throw error
+			}
+
+			const images = await listImagesForProduct(id)
+			return ok(c, images.map(serializeImage))
 		}
 	)
 

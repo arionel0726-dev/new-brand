@@ -10,7 +10,15 @@ const envSchema = z.object({
 	BETTER_AUTH_SECRET: z
 		.string()
 		.min(32, 'BETTER_AUTH_SECRET must be at least 32 characters (e.g. `openssl rand -hex 32`)'),
-	BETTER_AUTH_URL: z.url().default('http://localhost:3001')
+	BETTER_AUTH_URL: z.url().default('http://localhost:3001'),
+	// R2 is an optional integration: the app must boot and the catalog must
+	// keep working with none of these set. Media upload endpoints check
+	// isR2Configured() themselves and return a clean config error instead.
+	R2_ACCOUNT_ID: z.string().min(1).optional(),
+	R2_ACCESS_KEY_ID: z.string().min(1).optional(),
+	R2_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+	R2_BUCKET: z.string().min(1).optional(),
+	R2_PUBLIC_URL: z.url().optional()
 })
 
 export type Env = z.infer<typeof envSchema>
