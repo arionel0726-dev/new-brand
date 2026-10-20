@@ -50,3 +50,24 @@
  *     an unrelated request.
  */
 export const PENDING_ORDER_POLICY = 'manual_cancellation_only' as const
+
+/**
+ * Promotion/coupon redemption-count policy on cancellation (Sprint 8,
+ * Task 5): cancelling an order (customer self-service or staff) never
+ * restores a promotion's redemptionCount or a coupon's usesCount/
+ * coupon_redemptions row. Both only ever increase, exactly like the
+ * pending-order inventory reservation above has no automatic release
+ * tied to a business event other than an explicit cancel - except here,
+ * cancellation itself is *not* that event.
+ *
+ * Why: a redemption is a historical fact ("this coupon/promotion was
+ * used by this order") independent of whether the order later gets
+ * cancelled. Auto-restoring it on cancellation would let a customer
+ * cycle a single-use or per-customer-limited coupon indefinitely
+ * (place order, cancel, reorder, repeat) - exactly the abuse a usage
+ * limit exists to prevent. If a merchant genuinely wants to give a
+ * shopper their coupon use back after a cancelled order, that is a
+ * deliberate support action, not something this sprint invents or
+ * automates.
+ */
+export const REDEMPTION_RESTORE_ON_CANCEL_POLICY = 'never_restored' as const

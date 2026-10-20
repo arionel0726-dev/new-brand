@@ -12,7 +12,10 @@ export function serializeOrderItem(item: OrderItemRow, lang: Locale) {
 		variantName: localize(lang, item.variantNameRuSnapshot, item.variantNameRoSnapshot),
 		quantity: item.quantity,
 		unitPrice: item.unitPrice,
-		lineTotal: item.lineTotal
+		lineTotal: item.lineTotal,
+		promotionId: item.promotionId,
+		discountAmount: item.discountAmount,
+		netLineTotal: item.lineTotal - item.discountAmount
 	}
 }
 
@@ -64,6 +67,9 @@ export function serializeOrder(
 		currency: order.currency,
 		subtotalAmount: order.subtotalAmount,
 		discountAmount: order.discountAmount,
+		promotionDiscountAmount: order.promotionDiscountAmount,
+		couponDiscountAmount: order.couponDiscountAmount,
+		couponCode: order.couponCodeSnapshot,
 		shippingAmount: order.shippingAmount,
 		totalAmount: order.totalAmount,
 		customerName: order.customerName,

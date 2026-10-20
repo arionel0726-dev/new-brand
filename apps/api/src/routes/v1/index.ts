@@ -5,6 +5,7 @@ import { brandsRoute } from './brands'
 import { cartRoute } from './cart'
 import { categoriesRoute } from './categories'
 import { checkoutRoute } from './checkout'
+import { collectionsRoute } from './collections'
 import { deliveryRoute } from './delivery'
 import { ordersRoute } from './orders'
 import { productsRoute } from './products'
@@ -15,6 +16,7 @@ export const v1Route = new Hono<{ Variables: AuthVariables }>()
 	.route('/brands', brandsRoute)
 	.route('/categories', categoriesRoute)
 	.route('/products', productsRoute)
+	.route('/collections', collectionsRoute)
 	.route('/search', searchRoute)
 	.route('/admin', adminRoute)
 	.route('/cart', cartRoute)

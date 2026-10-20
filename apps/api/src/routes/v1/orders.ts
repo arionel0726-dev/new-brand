@@ -33,7 +33,8 @@ const createOrderSchema = z.object({
 	customerPhone: z.string().trim().min(1).max(32),
 	customerNote: z.string().trim().max(1000).nullable().optional(),
 	delivery: deliverySchema,
-	paymentMethod: paymentMethodSchema
+	paymentMethod: paymentMethodSchema,
+	couponCode: z.string().trim().min(1).max(64).nullable().optional()
 })
 
 const listQuerySchema = paginationSchema.extend({ lang: localeSchema.default('ru') })
@@ -119,10 +120,13 @@ export const ordersRoute = new Hono<{ Variables: AuthVariables }>()
 			phone: normalizedPhone,
 			note: body.customerNote ?? null
 		}
-		// Includes delivery and paymentMethod (Task 3): a replay of the same
-		// Idempotency-Key with a different delivery/payment selection must be
-		// a conflict, not a silent reuse of the original choice.
-		const requestHash = hashRequestPayload({ customer, delivery, paymentMethod: body.paymentMethod })
+		const couponCode = body.couponCode ?? null
+
+		// Includes delivery, paymentMethod, and the coupon selection (Task 5):
+		// a replay of the same Idempotency-Key with a different delivery/
+		// payment/coupon choice must be a conflict, not a silent reuse of the
+		// original selection.
+		const requestHash = hashRequestPayload({ customer, delivery, paymentMethod: body.paymentMethod, couponCode })
 
 		let result: Awaited<ReturnType<typeof createOrderFromCart>>
 		try {
@@ -133,7 +137,8 @@ export const ordersRoute = new Hono<{ Variables: AuthVariables }>()
 				cartOwner,
 				customer,
 				delivery,
-				paymentMethod: body.paymentMethod
+				paymentMethod: body.paymentMethod,
+				couponCode
 			})
 		} catch (error) {
 			if (error instanceof InsufficientStockError) {

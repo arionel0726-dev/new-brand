@@ -15,6 +15,7 @@ export type ProductSort = 'price_asc' | 'price_desc' | 'newest' | 'name_asc' | '
 
 export type ProductListFilters = {
 	productId?: string
+	productIds?: string[]
 	brandSlug?: string
 	categoryIds?: string[]
 	minPrice?: number
@@ -51,6 +52,10 @@ function buildFilters(filters: ProductListFilters): SQL[] {
 
 	if (filters.productId) {
 		conditions.push(eq(products.id, filters.productId))
+	}
+
+	if (filters.productIds) {
+		conditions.push(filters.productIds.length > 0 ? inArray(products.id, filters.productIds) : sql`false`)
 	}
 
 	if (filters.brandSlug) {
@@ -170,6 +175,20 @@ export async function getPublishableProductRowById(
 ): Promise<ProductListRow | null> {
 	const [row] = await baseListQuery({ productId }).limit(1)
 	return row ?? null
+}
+
+/**
+ * Every publicly publishable row (active status + at least one published
+ * variant) among a given set of product ids - reused by Product Collections
+ * (Task 7) so a curated membership list never surfaces a draft/archived or
+ * unsellable product, exactly the same "active status + published variant"
+ * rule the rest of the Catalog API already enforces. No pagination or
+ * ordering imposed here - the caller (e.g. a collection's own curated
+ * sortOrder) decides the order.
+ */
+export async function listPublishableProductsByIds(productIds: string[]): Promise<ProductListRow[]> {
+	if (productIds.length === 0) return []
+	return baseListQuery({ productIds })
 }
 
 /** Batch-fetch published (active + priced) variant SKUs for a set of product ids in a single query (no N+1). */

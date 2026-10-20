@@ -1,8 +1,10 @@
 import { sql } from 'drizzle-orm'
 import { check, index, integer, pgEnum, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core'
 import { user } from './auth'
+import { coupons } from './coupons'
 import { deliveryMethodEnum, deliveryZones, pickupLocations } from './delivery'
 import { paymentMethodEnum } from './payment-method'
+import { promotions } from './promotions'
 import { products } from './products'
 import { productVariants } from './product-variants'
 
@@ -36,7 +38,20 @@ export const orders = pgTable(
 		status: orderStatusEnum('status').notNull().default('pending'),
 		currency: text('currency').notNull().default('MDL'),
 		subtotalAmount: integer('subtotal_amount').notNull(),
+		// Total of every discount applied (promotions + coupon combined) -
+		// always equal to promotionDiscountAmount + couponDiscountAmount,
+		// enforced below. Kept as the one column the pre-existing
+		// total-consistency check already uses, so that invariant never had
+		// to change shape across Sprint 6/7/8.
 		discountAmount: integer('discount_amount').notNull().default(0),
+		promotionDiscountAmount: integer('promotion_discount_amount').notNull().default(0),
+		couponDiscountAmount: integer('coupon_discount_amount').notNull().default(0),
+		// 'restrict': a coupon that was ever actually redeemed can never be
+		// hard-deleted (Task 6) - only deactivated.
+		couponId: uuid('coupon_id').references(() => coupons.id, { onDelete: 'restrict' }),
+		// The code as typed - the point-in-time record, independent of
+		// whatever the coupon row's own `code` says later.
+		couponCodeSnapshot: text('coupon_code_snapshot'),
 		shippingAmount: integer('shipping_amount').notNull().default(0),
 		totalAmount: integer('total_amount').notNull(),
 		customerName: text('customer_name').notNull(),
@@ -73,6 +88,20 @@ export const orders = pgTable(
 		check('orders_currency_check', sql`${table.currency} = 'MDL'`),
 		check('orders_subtotal_non_negative_check', sql`${table.subtotalAmount} >= 0`),
 		check('orders_discount_non_negative_check', sql`${table.discountAmount} >= 0`),
+		check(
+			'orders_discount_breakdown_consistency_check',
+			sql`${table.discountAmount} = ${table.promotionDiscountAmount} + ${table.couponDiscountAmount}`
+		),
+		check(
+			'orders_promotion_discount_non_negative_check',
+			sql`${table.promotionDiscountAmount} >= 0`
+		),
+		check('orders_coupon_discount_non_negative_check', sql`${table.couponDiscountAmount} >= 0`),
+		check(
+			'orders_coupon_consistency_check',
+			sql`(${table.couponId} is null and ${table.couponCodeSnapshot} is null and ${table.couponDiscountAmount} = 0)
+				or (${table.couponId} is not null and ${table.couponCodeSnapshot} is not null)`
+		),
 		check('orders_shipping_non_negative_check', sql`${table.shippingAmount} >= 0`),
 		check('orders_total_non_negative_check', sql`${table.totalAmount} >= 0`),
 		check(
@@ -121,8 +150,18 @@ export const orderItems = pgTable(
 		variantNameRuSnapshot: text('variant_name_ru_snapshot'),
 		variantNameRoSnapshot: text('variant_name_ro_snapshot'),
 		quantity: integer('quantity').notNull(),
+		// Original, pre-discount values - lineTotal stays exactly
+		// unitPrice * quantity (unchanged invariant from Sprint 6). The
+		// promotion's effect is the separate discountAmount column below;
+		// the net amount actually owed for this line is lineTotal -
+		// discountAmount, computed at read time rather than stored again.
 		unitPrice: integer('unit_price').notNull(),
 		lineTotal: integer('line_total').notNull(),
+		// 'restrict': a promotion that ever discounted a real order_item can
+		// never be hard-deleted (Task 6) - only deactivated. Null when no
+		// promotion applied to this line.
+		promotionId: uuid('promotion_id').references(() => promotions.id, { onDelete: 'restrict' }),
+		discountAmount: integer('discount_amount').notNull().default(0),
 		// Reservation-lifecycle guards (src/orders/inventory.ts): each is set
 		// exactly once, so a release or commit can never double-apply to the
 		// same line even if called more than once for the same order.
@@ -138,6 +177,13 @@ export const orderItems = pgTable(
 		check(
 			'order_items_line_total_consistency_check',
 			sql`${table.lineTotal} = ${table.unitPrice} * ${table.quantity}`
+		),
+		check('order_items_discount_non_negative_check', sql`${table.discountAmount} >= 0`),
+		// Never reduces a line below zero (Task 2).
+		check('order_items_discount_lte_line_total_check', sql`${table.discountAmount} <= ${table.lineTotal}`),
+		check(
+			'order_items_promotion_consistency_check',
+			sql`${table.promotionId} is not null or ${table.discountAmount} = 0`
 		)
 	]
 )

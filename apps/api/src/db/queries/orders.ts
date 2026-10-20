@@ -9,6 +9,10 @@ import { computeShipping } from '../../checkout/shipping'
 import { AppError } from '../../middleware/error-handler'
 import type { Pagination } from '../../lib/pagination'
 import { getPaymentProvider, isOnlinePaymentsConfigured } from '../../payments/provider'
+import { normalizeCouponCode } from '../../coupons/normalize'
+import { redeemCoupon } from '../../coupons/redeem'
+import { validateCoupon, type CouponLine } from '../../coupons/validate'
+import { computePromotionDiscounts, incrementPromotionRedemption, type LineDiscount } from '../../promotions/pricing'
 import { carts, cartItems } from '../schema/carts'
 import { inventory } from '../schema/inventory'
 import type { PaymentMethod } from '../schema/payment-method'
@@ -154,6 +158,8 @@ export type CreateOrderInput = {
 	customer: { name: string; email: string; phone: string; note: string | null }
 	delivery: DeliveryInput
 	paymentMethod: PaymentMethod
+	/** The coupon code the shopper selected at checkout, if any - re-validated and redeemed from scratch here, never trusted from an earlier apply-coupon preview. */
+	couponCode: string | null
 }
 
 export type CreateOrderResult =
@@ -266,16 +272,79 @@ export async function createOrderFromCart(input: CreateOrderInput): Promise<Crea
 		}
 
 		const subtotalAmount = lines.reduce((sum, line) => sum + (line.price ?? 0) * line.quantity, 0)
-		const discountAmount = 0
+		const userId = input.cartOwner.type === 'user' ? input.cartOwner.userId : null
 
-		// Recomputed here, inside this same transaction, from the subtotal
-		// just computed above - a shipping-quote response the client holds
-		// from an earlier call is never trusted (Task 3).
+		// Recomputed fresh, inside this same transaction, from the lines just
+		// locked and validated above - never trusts an earlier checkout
+		// preview or apply-coupon response (Task 5).
+		const promotionDiscounts = await computePromotionDiscounts(
+			tx,
+			lines.map(line => ({
+				variantId: line.variantId,
+				productId: line.productId,
+				unitPrice: line.price as number,
+				quantity: line.quantity
+			}))
+		)
+
+		// A promotion can be exhausted by a concurrent order between the
+		// read-only pass above and this claim; per documented policy
+		// (incrementPromotionRedemption), losing that race just drops this
+		// line's discount rather than failing checkout.
+		const claimedPromotions = new Map<string, boolean>()
+		for (const discount of promotionDiscounts.values()) {
+			if (!discount.promotionId || claimedPromotions.has(discount.promotionId)) continue
+			claimedPromotions.set(discount.promotionId, await incrementPromotionRedemption(tx, discount.promotionId))
+		}
+		const appliedDiscounts = new Map<string, LineDiscount>()
+		for (const [variantId, discount] of promotionDiscounts) {
+			const claimed = discount.promotionId ? (claimedPromotions.get(discount.promotionId) ?? false) : false
+			appliedDiscounts.set(
+				variantId,
+				claimed ? discount : { variantId, promotionId: null, discountAmount: 0 }
+			)
+		}
+
+		const promotionDiscountTotal = [...appliedDiscounts.values()].reduce((sum, d) => sum + d.discountAmount, 0)
+		const discountedSubtotal = subtotalAmount - promotionDiscountTotal
+
+		let couponId: string | null = null
+		let couponCodeSnapshot: string | null = null
+		let couponDiscountAmount = 0
+		if (input.couponCode) {
+			const couponLines: CouponLine[] = lines.map(line => ({
+				variantId: line.variantId,
+				productId: line.productId,
+				netAmount: (line.price as number) * line.quantity - (appliedDiscounts.get(line.variantId)?.discountAmount ?? 0)
+			}))
+			const result = await validateCoupon(tx, input.couponCode, {
+				subtotalAmount: discountedSubtotal,
+				lines: couponLines,
+				userId
+			})
+			if (!result.ok) {
+				throw new AppError(result.message, 422, result.code, {
+					...(result.minOrderAmount !== undefined ? { minOrderAmount: result.minOrderAmount } : {})
+				})
+			}
+			couponId = result.coupon.id
+			couponCodeSnapshot = normalizeCouponCode(input.couponCode)
+			couponDiscountAmount = result.discountAmount
+		}
+
+		const discountAmount = promotionDiscountTotal + couponDiscountAmount
+		// Shipping's free-threshold comparison uses the subtotal after *every*
+		// applicable discount - promotions and coupon alike (Task 5).
+		const eligibleSubtotalForShipping = discountedSubtotal - couponDiscountAmount
+
+		// Recomputed here, inside this same transaction, from the eligible
+		// subtotal just computed above - a shipping-quote response the client
+		// holds from an earlier call is never trusted (Task 3).
 		const shippingSelection =
 			input.delivery.method === 'pickup'
 				? ({ method: 'pickup', pickupLocationId: input.delivery.pickupLocationId } as const)
 				: ({ method: 'courier', deliveryZoneId: input.delivery.deliveryZoneId } as const)
-		const shipping = await computeShipping(tx, shippingSelection, subtotalAmount)
+		const shipping = await computeShipping(tx, shippingSelection, eligibleSubtotalForShipping)
 		if (!shipping.ok) {
 			throw new AppError(shipping.message, 422, shipping.code, { minOrderAmount: shipping.minOrderAmount })
 		}
@@ -284,10 +353,14 @@ export async function createOrderFromCart(input: CreateOrderInput): Promise<Crea
 		const totalAmount = subtotalAmount - discountAmount + shippingAmount
 
 		const order = await insertOrderWithUniqueNumber(tx, {
-			userId: input.cartOwner.type === 'user' ? input.cartOwner.userId : null,
+			userId,
 			status: 'pending',
 			subtotalAmount,
 			discountAmount,
+			promotionDiscountAmount: promotionDiscountTotal,
+			couponDiscountAmount,
+			couponId,
+			couponCodeSnapshot,
 			shippingAmount,
 			totalAmount,
 			customerName: input.customer.name,
@@ -310,6 +383,25 @@ export async function createOrderFromCart(input: CreateOrderInput): Promise<Crea
 					})
 		})
 
+		// Atomic with order creation (Task 5): claimed only now that the order
+		// row exists, inside this same transaction - a retried/replayed
+		// request never reaches here twice (the idempotency claim above
+		// already returned 'replayed' before any of this runs), and losing
+		// the race here rolls back the whole order, inventory reservation
+		// included.
+		if (couponId) {
+			const redemption = await redeemCoupon(tx, couponId, userId, order.id, couponDiscountAmount)
+			if (!redemption.ok) {
+				throw new AppError(
+					redemption.code === 'coupon_usage_limit_reached'
+						? 'This coupon has reached its usage limit.'
+						: 'You have already used this coupon the maximum number of times.',
+					409,
+					redemption.code
+				)
+			}
+		}
+
 		const provider = getPaymentProvider(input.paymentMethod)
 		const initiated = await provider.initiatePayment({
 			orderId: order.id,
@@ -325,19 +417,24 @@ export async function createOrderFromCart(input: CreateOrderInput): Promise<Crea
 		})
 
 		await tx.insert(orderItems).values(
-			lines.map(line => ({
-				orderId: order.id,
-				productId: line.productId,
-				variantId: line.variantId,
-				skuSnapshot: line.variantSku,
-				productNameRuSnapshot: line.productNameRu,
-				productNameRoSnapshot: line.productNameRo,
-				variantNameRuSnapshot: line.variantNameRu,
-				variantNameRoSnapshot: line.variantNameRo,
-				quantity: line.quantity,
-				unitPrice: line.price as number,
-				lineTotal: (line.price as number) * line.quantity
-			}))
+			lines.map(line => {
+				const discount = appliedDiscounts.get(line.variantId)
+				return {
+					orderId: order.id,
+					productId: line.productId,
+					variantId: line.variantId,
+					skuSnapshot: line.variantSku,
+					productNameRuSnapshot: line.productNameRu,
+					productNameRoSnapshot: line.productNameRo,
+					variantNameRuSnapshot: line.variantNameRu,
+					variantNameRoSnapshot: line.variantNameRo,
+					quantity: line.quantity,
+					unitPrice: line.price as number,
+					lineTotal: (line.price as number) * line.quantity,
+					promotionId: discount?.promotionId ?? null,
+					discountAmount: discount?.discountAmount ?? 0
+				}
+			})
 		)
 
 		await tx.insert(orderStatusHistory).values({
