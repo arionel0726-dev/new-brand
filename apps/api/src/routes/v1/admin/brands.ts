@@ -12,6 +12,7 @@ import { buildPageMeta, paginationSchema } from '../../../lib/pagination'
 import { okWithMeta, ok } from '../../../lib/respond'
 import { idParamSchema, validateJson, validateParam, validateQuery } from '../../../lib/validate'
 import { AppError } from '../../../middleware/error-handler'
+import { syncProductsForBrand } from '../../../search/sync'
 
 const slugSchema = z
 	.string()
@@ -83,6 +84,19 @@ export const adminBrandsRoute = new Hono<{ Variables: AuthVariables }>()
 		const body = c.req.valid('json')
 		const brand = await updateBrand(id, body)
 		if (!brand) throw new AppError('Brand not found', 404, 'brand_not_found')
+
+		// A renamed brand's name/slug is embedded in every one of its
+		// products' search documents - only the products that reference it,
+		// never a full reindex (Sprint 9 Task 3).
+		if (body.nameRu !== undefined || body.nameRo !== undefined || body.slug !== undefined) {
+			const outcomes = await syncProductsForBrand(id)
+			for (const outcome of outcomes) {
+				if (outcome.status === 'error') {
+					console.error(`[admin] search sync failed for product ${outcome.productId}:`, outcome.message)
+				}
+			}
+		}
+
 		return ok(c, serializeBrand(brand))
 	})
 

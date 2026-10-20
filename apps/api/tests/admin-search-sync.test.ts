@@ -118,6 +118,38 @@ describe.skipIf(!meiliAvailable)('admin writes sync to Meilisearch (instance ava
 
 		await expect(getProductsIndex().getDocument(product.id)).rejects.toThrow()
 	})
+
+	test('renaming a brand resyncs every product that references it (Sprint 9 Task 3)', async () => {
+		const cookie = await staffCookie()
+		const { product } = await publishedProduct(cookie)
+
+		const brandId = product.brandId
+		await requestJson(`/api/v1/admin/brands/${brandId}`, {
+			method: 'PATCH',
+			headers: { Cookie: cookie },
+			body: JSON.stringify({ nameRu: 'Новое имя', nameRo: 'Nume nou' })
+		})
+
+		const doc = await getProductsIndex().getDocument(product.id)
+		expect(doc.brandNameRu).toBe('Новое имя')
+		expect(doc.brandNameRo).toBe('Nume nou')
+	})
+
+	test('renaming a category resyncs every product tagged with it (Sprint 9 Task 3)', async () => {
+		const cookie = await staffCookie()
+		const { product } = await publishedProduct(cookie)
+
+		const categoryId = product.categoryIds[0]
+		await requestJson(`/api/v1/admin/categories/${categoryId}`, {
+			method: 'PATCH',
+			headers: { Cookie: cookie },
+			body: JSON.stringify({ nameRu: 'Новая категория', nameRo: 'Categorie noua' })
+		})
+
+		const doc = await getProductsIndex().getDocument(product.id)
+		expect(doc.categoryNamesRu).toContain('Новая категория')
+		expect(doc.categoryNamesRo).toContain('Categorie noua')
+	})
 })
 
 describe.skipIf(meiliAvailable)(

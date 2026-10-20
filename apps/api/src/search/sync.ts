@@ -17,7 +17,13 @@
  * Recovery from a missed or failed sync is the full `reindexProducts()`
  * reindex (Task 3 requirement: no queue/outbox is being introduced here).
  */
-import { fetchCategoriesForProducts, fetchSkusForProducts, getPublishableProductRowById } from '../db/queries/products'
+import {
+	fetchCategoriesForProducts,
+	fetchSkusForProducts,
+	getPublishableProductRowById,
+	listProductIdsByBrand,
+	listProductIdsByCategory
+} from '../db/queries/products'
 import { indexProducts, removeProductsFromIndex, toSearchDocument } from './products-index'
 
 export type SyncOutcome =
@@ -80,6 +86,33 @@ export async function removeProductFromIndex(productId: string): Promise<SyncOut
 	} catch (error) {
 		return { status: 'error', productId, operation: 'remove', message: logFailure('remove', productId, error) }
 	}
+}
+
+/**
+ * Bounded re-sync for every product referencing one brand or category
+ * (Sprint 9 Task 3). A brand/category rename is never reflected in
+ * Meilisearch on its own - products only ever re-sync themselves on their
+ * *own* write (see syncAfterWrite in the admin products/variants routes) -
+ * so without this, a renamed brand/category leaves every product that
+ * references it holding the old name in the index indefinitely. This is
+ * the deliberately cheap alternative to a full reindexProducts() sweep:
+ * only the directly affected products are touched, each via the exact same
+ * single-product sync path, so the cost scales with how many products
+ * reference that one brand/category - never with the whole catalog.
+ *
+ * Best-effort per product, same as syncProductToIndex: one product's
+ * Meilisearch failure is reported in the returned outcome list rather than
+ * aborting the rest, and never thrown back at the caller (the brand/
+ * category write itself already committed in Postgres).
+ */
+export async function syncProductsForBrand(brandId: string): Promise<SyncOutcome[]> {
+	const productIds = await listProductIdsByBrand(brandId)
+	return Promise.all(productIds.map(syncProductToIndex))
+}
+
+export async function syncProductsForCategory(categoryId: string): Promise<SyncOutcome[]> {
+	const productIds = await listProductIdsByCategory(categoryId)
+	return Promise.all(productIds.map(syncProductToIndex))
 }
 
 export { reindexProducts } from './reindex'

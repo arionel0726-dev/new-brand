@@ -210,6 +210,21 @@ export async function fetchSkusForProducts(productIds: string[]) {
 	return map
 }
 
+/** Every product id referencing a given brand - regardless of status, so a draft product's search document also gets refreshed if it's published later with stale brand data already queued. Used to bound a brand-rename resync to only the products it actually affects (Sprint 9 Task 3), never a full reindex. */
+export async function listProductIdsByBrand(brandId: string): Promise<string[]> {
+	const rows = await db.select({ id: products.id }).from(products).where(eq(products.brandId, brandId))
+	return rows.map(row => row.id)
+}
+
+/** Every product id tagged with a given category, the same bounded-resync rationale as listProductIdsByBrand above. */
+export async function listProductIdsByCategory(categoryId: string): Promise<string[]> {
+	const rows = await db
+		.select({ id: productCategories.productId })
+		.from(productCategories)
+		.where(eq(productCategories.categoryId, categoryId))
+	return rows.map(row => row.id)
+}
+
 /** Batch-fetch categories for a set of product ids in a single query (no N+1). */
 export async function fetchCategoriesForProducts(productIds: string[]) {
 	if (productIds.length === 0) return new Map<string, { id: string; slug: string; nameRu: string; nameRo: string }[]>()

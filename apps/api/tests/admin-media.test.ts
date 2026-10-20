@@ -38,9 +38,12 @@ mock.module('../src/media/r2', () => ({
 	}
 }))
 
+import { eq } from 'drizzle-orm'
 import { db } from '../src/db/client'
 import { getUploadById } from '../src/db/queries/admin-media'
 import { mediaPendingDeletions } from '../src/db/schema/media-pending-deletions'
+import { mediaUploads } from '../src/db/schema/media-uploads'
+import { cleanupPendingDeletions, sweepExpiredUploads } from '../src/media/cleanup'
 import { createSessionAs, requestJson, resetAuthTables, resetDatabase } from './helpers'
 
 beforeEach(async () => {
@@ -480,5 +483,60 @@ describe('public catalog API after images exist', () => {
 		expect(publicDetail.body.data.images[0].variantId).toBe(variant.id)
 		// Internal storage details are never exposed on the public API.
 		expect(publicDetail.body.data.images[0]).not.toHaveProperty('objectKey')
+	})
+})
+
+describe('cleanup CLI: expired, never-confirmed upload sessions (Sprint 9 Task 4)', () => {
+	test('an expired pending session is rejected and its object queued for deletion, even if nothing was ever uploaded', async () => {
+		const staff = await staffCookie()
+		const { product } = await createCatalogFixtures(staff)
+		const init = await initUpload(staff, product.id)
+		const uploadId = init.body.data.uploadId
+
+		// The client vanished: never PUT anything to R2, never called
+		// /complete. Simulate time passing by backdating expiresAt directly -
+		// this is the one state nothing else in the app revisits on its own.
+		await db.update(mediaUploads).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(mediaUploads.id, uploadId))
+
+		const swept = await sweepExpiredUploads()
+		expect(swept.swept).toBe(1)
+
+		const session = await getUploadById(uploadId)
+		expect(session?.status).toBe('rejected')
+
+		const [pendingDeletion] = await db
+			.select()
+			.from(mediaPendingDeletions)
+			.where(eq(mediaPendingDeletions.objectKey, session!.objectKey))
+		expect(pendingDeletion).toBeDefined()
+
+		// cleanupPendingDeletions tolerates a key that was never actually
+		// written to R2 - deleting a key that doesn't exist is a no-op.
+		const cleanup = await cleanupPendingDeletions()
+		expect(cleanup.succeeded).toBe(1)
+	})
+
+	test('a still-pending, not-yet-expired session is left untouched', async () => {
+		const staff = await staffCookie()
+		const { product } = await createCatalogFixtures(staff)
+		const init = await initUpload(staff, product.id)
+
+		const swept = await sweepExpiredUploads()
+		expect(swept.swept).toBe(0)
+
+		const session = await getUploadById(init.body.data.uploadId)
+		expect(session?.status).toBe('pending')
+	})
+
+	test('a completed upload is never swept, even long past its original expiry', async () => {
+		const staff = await staffCookie()
+		const { product } = await createCatalogFixtures(staff)
+		const { complete } = await uploadAndCompleteImage(staff, product.id)
+		const uploadId = complete.body.data.id // image id, not upload id - re-fetch via product
+
+		await db.update(mediaUploads).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(mediaUploads.imageId, uploadId))
+
+		const swept = await sweepExpiredUploads()
+		expect(swept.swept).toBe(0)
 	})
 })

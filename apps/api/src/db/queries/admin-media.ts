@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { db } from '../client'
 import { mediaPendingDeletions } from '../schema/media-pending-deletions'
 import { mediaUploads } from '../schema/media-uploads'
@@ -70,6 +70,39 @@ export async function completeUploadWithImage(
 		await tx.update(mediaUploads).set({ imageId: image.id }).where(eq(mediaUploads.id, uploadId))
 		return image
 	})
+}
+
+/**
+ * Every 'pending' upload session whose presigned URL has expired
+ * (Sprint 9 Task 4). A session the client abandoned after actually PUTting
+ * the object to R2 but never calling /complete would otherwise leak that
+ * object forever - nothing else in this codebase ever revisits a session
+ * nobody confirmed or re-attempted. Same conditional-UPDATE-then-act shape
+ * as rejectUploadIfPending, just batched: each row only transitions
+ * 'pending' -> 'rejected' once, so re-running this sweep concurrently or
+ * repeatedly is always safe.
+ */
+export async function sweepExpiredUploadSessions(limit: number): Promise<MediaUploadRow[]> {
+	const candidates = await db
+		.select({ id: mediaUploads.id })
+		.from(mediaUploads)
+		.where(and(eq(mediaUploads.status, 'pending'), sql`${mediaUploads.expiresAt} < now()`))
+		.limit(limit)
+	if (candidates.length === 0) return []
+
+	return db
+		.update(mediaUploads)
+		.set({ status: 'rejected' })
+		.where(
+			and(
+				eq(mediaUploads.status, 'pending'),
+				inArray(
+					mediaUploads.id,
+					candidates.map(row => row.id)
+				)
+			)
+		)
+		.returning()
 }
 
 /** Best-effort bookkeeping so a failed/never-attempted R2 delete is never mistaken for "done". Safe to call more than once for the same key. */

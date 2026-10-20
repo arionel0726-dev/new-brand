@@ -13,6 +13,7 @@ import { buildPageMeta, paginationSchema } from '../../../lib/pagination'
 import { okWithMeta, ok } from '../../../lib/respond'
 import { idParamSchema, validateJson, validateParam, validateQuery } from '../../../lib/validate'
 import { AppError } from '../../../middleware/error-handler'
+import { syncProductsForCategory } from '../../../search/sync'
 
 const slugSchema = z
 	.string()
@@ -105,6 +106,19 @@ export const adminCategoriesRoute = new Hono<{ Variables: AuthVariables }>()
 
 		const category = await updateCategory(id, body)
 		if (!category) throw new AppError('Category not found', 404, 'category_not_found')
+
+		// Same rationale as admin/brands.ts: a renamed category's name/slug is
+		// embedded in every one of its products' search documents - only the
+		// products tagged with it, never a full reindex (Sprint 9 Task 3).
+		if (body.nameRu !== undefined || body.nameRo !== undefined || body.slug !== undefined) {
+			const outcomes = await syncProductsForCategory(id)
+			for (const outcome of outcomes) {
+				if (outcome.status === 'error') {
+					console.error(`[admin] search sync failed for product ${outcome.productId}:`, outcome.message)
+				}
+			}
+		}
+
 		return ok(c, serializeCategory(category))
 	})
 

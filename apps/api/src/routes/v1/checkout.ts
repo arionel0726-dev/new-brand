@@ -13,10 +13,22 @@ import { localeSchema } from '../../lib/locale'
 import { ok } from '../../lib/respond'
 import { validateJson, validateQuery } from '../../lib/validate'
 import { AppError } from '../../middleware/error-handler'
+import { clientIpFor, createRateLimiter } from '../../middleware/rate-limit'
 
 const previewQuerySchema = z.object({ lang: localeSchema.default('ru') })
 const shippingQuoteSchema = z.object({ delivery: deliverySchema })
 const applyCouponSchema = z.object({ code: z.string().trim().min(1).max(64) })
+
+// Without this, POST /apply-coupon is a free, unauthenticated oracle for
+// brute-forcing/enumerating valid coupon codes (Sprint 9 Task 1) - it needs
+// no cart contents and returns a distinct error per guess. Same shape as
+// orders.ts's order-creation limiter: generous for a real shopper retrying
+// a mistyped code, enough friction to blunt a scripted guesser.
+const applyCouponRateLimit = createRateLimiter({
+	windowMs: 10 * 60 * 1000,
+	max: 20,
+	keyFor: clientIpFor
+})
 
 function toSelection(delivery: z.infer<typeof deliverySchema>): DeliverySelection {
 	return delivery.method === 'pickup'
@@ -66,7 +78,7 @@ export const checkoutRoute = new Hono<{ Variables: AuthVariables }>()
 			]
 		})
 	})
-	.post('/apply-coupon', validateQuery(previewQuerySchema), validateJson(applyCouponSchema), async c => {
+	.post('/apply-coupon', applyCouponRateLimit, validateQuery(previewQuerySchema), validateJson(applyCouponSchema), async c => {
 		const { code } = c.req.valid('json')
 
 		const cart = await resolveExistingCart(c)
