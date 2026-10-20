@@ -10,9 +10,9 @@ import { resolveOrCreateMapping } from '../src/import/mappings'
 import { resetDatabase } from './helpers'
 
 const A10_GROUP = [
-	{ ID_nom: 10568, VariativeNomenclature: 'A10.XXX', VariativeName: 'Lipstick A10', ColorVar: 'Red' },
-	{ ID_nom: 10516, VariativeNomenclature: 'A10.XXX', VariativeName: 'Lipstick A10', ColorVar: 'Pink' },
-	{ ID_nom: 10559, VariativeNomenclature: 'A10.XXX', VariativeName: 'Lipstick A10', ColorVar: 'Coral' }
+	{ ID_nom: 10568, VariativeNomenclature: 'A10.XXX', VariativeName: 'Lipstick A10', ColorVar: 'Red', Brand: 'Anny' },
+	{ ID_nom: 10516, VariativeNomenclature: 'A10.XXX', VariativeName: 'Lipstick A10', ColorVar: 'Pink', Brand: 'Anny' },
+	{ ID_nom: 10559, VariativeNomenclature: 'A10.XXX', VariativeName: 'Lipstick A10', ColorVar: 'Coral', Brand: 'Anny' }
 ]
 
 beforeEach(async () => {
@@ -127,5 +127,56 @@ describe('runDryRun: summary correctness', () => {
 		await runDryRun({ feedType: 'products', sourceSystem: '1c', payload: A10_GROUP, persistReport: true })
 		const second = await runDryRun({ feedType: 'products', sourceSystem: '1c', payload: A10_GROUP })
 		expect(second.summary.priorRunsWithSameChecksum).toBe(1)
+	})
+})
+
+describe('runDryRun: Sprint 10A.1 reporting upgrades', () => {
+	test('reports distinct unresolved brand names from the products feed, never used as a mapping key', async () => {
+		const result = await runDryRun({ feedType: 'products', sourceSystem: '1c', payload: A10_GROUP })
+		expect(result.summary.unresolvedBrandNames).toEqual(['Anny'])
+		expect(result.summary.unresolvedCategoryCount).toBe(0)
+	})
+
+	test('reports candidatesMissingEnrichment distinctly from candidatesBlocked', async () => {
+		const result = await runDryRun({
+			feedType: 'products',
+			sourceSystem: '1c',
+			payload: [{ ID_nom: 99 }] // standalone, no VariativeName, no enrichment
+		})
+		expect(result.summary.candidatesBlocked).toBe(1)
+		expect(result.summary.candidatesMissingEnrichment).toBe(1)
+	})
+
+	test('an enrichment-resolved standalone candidate is not counted as blocked or missing enrichment', async () => {
+		const result = await runDryRun({
+			feedType: 'products',
+			sourceSystem: '1c',
+			payload: [{ ID_nom: 20001 }],
+			nameEnrichment: { mysqlTitles: new Map([['20001', { titleRu: 'Товар', titleRo: null }]]) }
+		})
+		expect(result.summary.candidatesBlocked).toBe(0)
+		expect(result.summary.candidatesMissingEnrichment).toBe(0)
+	})
+
+	test('reports a price-parsing-error count distinct from other rejections', async () => {
+		const result = await runDryRun({
+			feedType: 'pricevn',
+			sourceSystem: '1c',
+			payload: [{ ID_nom: 1, Price: 'not-a-price' }, { notAValidRecord: true }]
+		})
+		expect(result.summary.recordsRejected).toBe(2)
+		expect(result.summary.priceParsingErrorCount).toBe(1)
+	})
+
+	test('reports seoBlankFieldCount for the jobvn_seo feed (real sample case: ID_nom 10568 has both SEO fields blank)', async () => {
+		const result = await runDryRun({
+			feedType: 'jobvn_seo',
+			sourceSystem: '1c',
+			payload: [
+				{ ID_nom: 10568, SeoHeaderRU: '', SeoDescriptionRU: '' },
+				{ ID_nom: 10516, SeoHeaderRU: 'Title', SeoDescriptionRU: 'Description' }
+			]
+		})
+		expect(result.summary.seoBlankFieldCount).toBe(1)
 	})
 })

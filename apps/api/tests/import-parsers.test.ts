@@ -139,25 +139,53 @@ describe('parsePricevnFeed', () => {
 })
 
 describe('parseJobvnSeoFeed', () => {
-	test('parses a record with every SEO field present', () => {
+	test('parses a record with every confirmed SEO field present', () => {
 		const result = parseJobvnSeoFeed([
-			{ ID_nom: 1, MetaTitle: 'Title', MetaDescription: 'Description', Url: '/produs/exemplu' }
+			{
+				ID_nom: 10516,
+				WarehouseName: 'A10.253 nail polish ANNY',
+				Brand: 'Anny',
+				ShortDescriptionRus: 'ANNY Nail Polish Лак для ногтей',
+				VariativeNomenclature: 'A10.XXX',
+				VariativeName: 'NAIL POLISH ANNY',
+				SeoHeaderRU: 'Лак для ногтей Anny',
+				SeoDescriptionRU: 'Купить лак для ногтей Anny в Молдове',
+				Price: 170,
+				PriceWH: 85
+			}
 		])
 		expect(result.validRecords).toHaveLength(1)
+		expect(result.validRecords[0]).toMatchObject({
+			SeoHeaderRU: 'Лак для ногтей Anny',
+			SeoDescriptionRU: 'Купить лак для ногтей Anny в Молдове',
+			Price: 17000,
+			PriceWH: 8500
+		})
 	})
 
-	test('empty SEO fields parse to null, never fabricated placeholder text', () => {
-		const result = parseJobvnSeoFeed([{ ID_nom: 1, MetaTitle: '', MetaDescription: null }])
-		expect(result.validRecords[0]).toMatchObject({ MetaTitle: null, MetaDescription: null })
+	test('empty SEO fields parse to null, never fabricated placeholder text (real-sample case: ID_nom 10568)', () => {
+		const result = parseJobvnSeoFeed([
+			{ ID_nom: 10568, ShortDescriptionRus: '', SeoHeaderRU: '', SeoDescriptionRU: '' }
+		])
+		expect(result.validRecords[0]).toMatchObject({
+			ShortDescriptionRus: null,
+			SeoHeaderRU: null,
+			SeoDescriptionRU: null
+		})
 	})
 
-	test('a record with only the linking id still parses (every SEO field is optional)', () => {
+	test('a record with only the linking id still parses (every other field is optional)', () => {
 		const result = parseJobvnSeoFeed([{ ID_nom: 1 }])
 		expect(result.rejected).toHaveLength(0)
 	})
 
 	test('rejects malformed field types it cannot safely interpret as text', () => {
-		const result = parseJobvnSeoFeed([{ ID_nom: 1, MetaTitle: { nested: 'object' } }])
+		const result = parseJobvnSeoFeed([{ ID_nom: 1, SeoHeaderRU: { nested: 'object' } }])
 		expect(result.rejected).toHaveLength(1)
+	})
+
+	test('WarehouseName is retained via passthrough but never typed as a title/name field', () => {
+		const result = parseJobvnSeoFeed([{ ID_nom: 1, WarehouseName: 'A10.396 nail polish ANNY' }])
+		expect((result.validRecords[0] as Record<string, unknown>).WarehouseName).toBe('A10.396 nail polish ANNY')
 	})
 })

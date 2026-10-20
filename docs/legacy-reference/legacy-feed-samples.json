@@ -1,0 +1,114 @@
+{
+  "meta": {
+    "purpose": "Обезличенный пример структуры Legacy-фидов для проектирования импорта V2",
+    "source_files": [
+      "public/import/products.json",
+      "public/import/pricevn.json",
+      "public/import/JobVN.json"
+    ],
+    "note": "Выбраны только поля, нужные для проверки идентификаторов, вариантов, цен, остатков и SEO. Длинные описания и составы намеренно опущены. Персональных данных клиентов в этих товарных фидах не используется.",
+    "variant_rule_observed": "Несколько записей с одним VariativeNomenclature образуют группу вариантов; ID_nom различает конкретный вариант."
+  },
+  "products": [
+    {
+      "ID_nom": 10568,
+      "WarehouseName": "A10.396 nail polish ANNY",
+      "Barcode": "4051761201249",
+      "Brand": "Anny",
+      "ColorVar": "396",
+      "VolumeVar": "15",
+      "Sex": "Женский",
+      "VariativeNomenclature": "A10.XXX",
+      "VariativeName": "NAIL POLISH ANNY",
+      "QuantityBalance": 0,
+      "Price": 170,
+      "PriceWH": 85
+    },
+    {
+      "ID_nom": 10516,
+      "WarehouseName": "A10.253 nail polish ANNY",
+      "Barcode": "4051761201232",
+      "Brand": "Anny",
+      "ColorVar": "253",
+      "VolumeVar": "15",
+      "Sex": "Женский",
+      "VariativeNomenclature": "A10.XXX",
+      "VariativeName": "NAIL POLISH ANNY",
+      "QuantityBalance": 0,
+      "Price": 170,
+      "PriceWH": 85
+    },
+    {
+      "ID_nom": 10559,
+      "WarehouseName": "A10.369.50 nail polish ANNY",
+      "Barcode": "4051761202772",
+      "Brand": "Anny",
+      "ColorVar": "369.50",
+      "VolumeVar": "15",
+      "Sex": "Женский",
+      "VariativeNomenclature": "A10.XXX",
+      "VariativeName": "NAIL POLISH ANNY",
+      "QuantityBalance": 0,
+      "Price": 170,
+      "PriceWH": 85
+    }
+  ],
+  "pricevn": [
+    {
+      "ID_nom": 10568,
+      "DiscountPrice": 0,
+      "VariativeNomenclature": "A10.XXX",
+      "Price": 170
+    },
+    {
+      "ID_nom": 10516,
+      "DiscountPrice": 0,
+      "VariativeNomenclature": "A10.XXX",
+      "Price": 170
+    },
+    {
+      "ID_nom": 10559,
+      "DiscountPrice": 0,
+      "VariativeNomenclature": "A10.XXX",
+      "Price": 170
+    }
+  ],
+  "JobVN": [
+    {
+      "ID_nom": 10568,
+      "WarehouseName": "A10.396 nail polish ANNY",
+      "Brand": "Anny",
+      "ShortDescriptionRus": "",
+      "VariativeNomenclature": "A10.XXX",
+      "VariativeName": "NAIL POLISH ANNY",
+      "SeoHeaderRU": "",
+      "SeoDescriptionRU": "",
+      "Price": 170,
+      "PriceWH": 85
+    },
+    {
+      "ID_nom": 10516,
+      "WarehouseName": "A10.253 nail polish ANNY",
+      "Brand": "Anny",
+      "ShortDescriptionRus": "ANNY Nail Polish Лак для ногтей",
+      "VariativeNomenclature": "A10.XXX",
+      "VariativeName": "NAIL POLISH ANNY",
+      "SeoHeaderRU": "",
+      "SeoDescriptionRU": "",
+      "Price": 170,
+      "PriceWH": 85
+    },
+    {
+      "ID_nom": 10559,
+      "WarehouseName": "A10.369.50 nail polish ANNY",
+      "Brand": "Anny",
+      "ShortDescriptionRus": "",
+      "VariativeNomenclature": "A10.XXX",
+      "VariativeName": "NAIL POLISH ANNY",
+      "SeoHeaderRU": "",
+      "SeoDescriptionRU": "",
+      "Price": 170,
+      "PriceWH": 85
+    }
+  ]
+}

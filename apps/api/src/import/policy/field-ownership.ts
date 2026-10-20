@@ -35,48 +35,62 @@ export type FieldKey =
 	| 'variantGroupNaming'
 
 /**
- * Initial classification (Task 7's "suggested initial classification").
- * 1C/feed-owned and website-managed entries are this sprint's confirmed
- * recommendation; everything marked 'unresolved' is explicitly listed in
- * the task as not yet decided and defaults to the safest behavior
- * (preserve existing, emit a conflict) until the store owner resolves it.
+ * Classification as of Sprint 10A.1 Task 7, now grounded in the real
+ * `vizaje_nica_local.sql`, `legacy-feed-samples.json`, and
+ * `workapp-1c-observed-contract.md` (see docs/legacy-reference/) rather
+ * than Sprint 10A's field-list-only guesses. Every note below says
+ * exactly what evidence backs it; 'unresolved' entries are still
+ * genuinely unresolved, not just unconfirmed, and default to the safest
+ * behavior (preserve existing, emit a conflict).
  */
 export const PRODUCT_FIELD_OWNERSHIP_POLICY: Record<FieldKey, FieldPolicyEntry> = {
 	externalNomenclatureIdentity: {
 		owner: 'feed',
-		note: 'ID_nom / VariativeNomenclature identity - the feed is definitionally authoritative for its own identifiers.'
+		note: 'Confirmed: ID_nom / VariativeNomenclature are the feed\'s own identifiers (legacy_feed-samples.json); products.GUID stores ID_nom (vizaje-legacy-discovery.md section 3). The feed is definitionally authoritative for its own identifiers.'
 	},
 	basePrice: {
 		owner: 'feed',
-		note: 'Recommended, not yet confirmed as a production rule - and regardless, Sprint 10A does not import production prices at all (see Task 9 restrictions). Recorded here for when price sync is eventually scoped.'
+		note: 'Confirmed field names: Price/PriceWH (products.json, pricevn.json samples), DiscountPrice (pricevn.json). Confirmed legacy MySQL destination types are inconsistent and risky: products.price/priceWH are float, products_variable.discount_price is varchar(32) (a plain string, not numeric) - a real legacy data-quality signal, not a V2 design choice. Still out of scope for any writes this sprint (Task 9 restrictions) regardless of ownership.'
 	},
 	stockSnapshot: {
 		owner: 'feed',
-		note: 'Recommended, not yet confirmed - and, like basePrice, out of scope for any writes this sprint.'
+		note: 'Confirmed field: QuantityBalance (products.json sample, value 0 for every ANNY variant). WarehouseName is also confirmed present but is feed *metadata*, never a stock quantity or a location - do not conflate the two. Still out of scope for any writes this sprint.'
 	},
-	barcode: { owner: 'feed', note: '1C is the natural source of truth for a scannable barcode.' },
+	barcode: {
+		owner: 'feed',
+		note: 'Confirmed both sides: Barcode in the feed (e.g. "4051761201249") and products.barcode/products_variable.barcode in MySQL (varchar(256), nullable, no uniqueness constraint in either table - do not assume barcode uniqueness).'
+	},
 	nomenclatureMetadata: {
 		owner: 'feed',
-		note: 'ColorVar/VolumeVar and similar 1C-derived variant attributes.'
+		note: 'Confirmed fields: ColorVar, VolumeVar, Sex, and a Brand *name string* (e.g. "Anny") - all present in the real products.json sample. Brand here is a display string, not yet a resolved V2 brand id; matching it is a dry-run/normalization concern (reported as unmatched_brand), never assumed reliable on its own.'
 	},
-	images: { owner: 'website', note: 'Product photography is curated through the existing admin media pipeline, never overwritten by a feed.' },
-	curatedDescription: { owner: 'website', note: 'Marketing copy written for the V2 storefront.' },
-	seoMetadata: { owner: 'website', note: 'SEO metadata curated on the V2 side - see also the unresolved JobVN SEO feed question below.' },
-	merchandising: { owner: 'website', note: 'Collections, sort order, and similar V2-only merchandising concepts with no legacy equivalent.' },
-	manualVisibility: { owner: 'website', note: 'A product\'s publish/draft/archived state on V2 is a storefront decision, never flipped by an import.' },
+	images: { owner: 'website', note: 'products_img/products_variable_img exist in legacy MySQL with no GUID/feed-key column at all - confirmed to be a locally-managed back-office concern (vizaje-legacy-discovery.md section 6), matching V2\'s existing admin media/R2 pipeline. Never overwritten by a feed.' },
+	curatedDescription: { owner: 'website', note: 'products.textRU/textRO (long-form content) are distinct from the short ShortDescriptionRus seen in the JobVN sample (see titleRuRo below) - kept website-owned as the safer default. Note legacy\'s own Import::import() reportedly overwrites this from the feed on every run (vizaje-legacy-discovery.md section 3); V2 deliberately does not copy that behavior without an explicit decision.' },
+	seoMetadata: {
+		owner: 'feed',
+		note: 'CORRECTED in Sprint 10A.1 (was "website" in Sprint 10A): the JobVN feed confirmed carries SeoHeaderRU/SeoDescriptionRU (legacy-feed-samples.json), and workapp-1c-observed-contract.md + vizaje-legacy-discovery.md both confirm Import::update_seo() writes these into products.seoTitleRU/seoDescRU from this exact feed. So the feed genuinely is a real source for SEO fields - but the existing blank-value guard (see resolveFieldValue below) still applies: a blank incoming SeoHeaderRU/SeoDescriptionRU (both empty strings in the ID_nom 10568 sample) must never erase a nonblank curated value (Task 4\'s explicit instruction). No RO SEO field was observed in the JobVN sample at all, despite products/brands/categories all having seoTitleRO/seoDescRO columns - RO SEO source is unresolved (see docs).'
+	},
+	merchandising: { owner: 'website', note: 'home_categories/home_brand_sections/home_product_items (confirmed MySQL tables) have no feed/GUID column at all - confirmed locally-managed, no legacy equivalent in any feed.' },
+	manualVisibility: { owner: 'website', note: 'products.isShown is a plain tinyint with no feed counterpart in any of the three samples - a product\'s publish/draft/archived state on V2 remains a storefront decision, never flipped by an import.' },
 	titleRuRo: {
 		owner: 'unresolved',
-		note: 'Unresolved (Task 7): the products feed confirmed this sprint has no per-product/variant name field at all (only VariativeName, a group-level name) - see src/import/normalize/products.ts. Whether RU/RO titles ever come from a feed, and from which one, is undecided.'
+		note: 'Still unresolved, but now with real evidence: products.titleRU/titleRO/titleEN exist in MySQL (confirmed columns) and are the actual display titles - but no confirmed 1C feed field maps directly to an individual product/variant title. The only name-shaped feed field is VariativeName, which names a *group*, not an individual item (see src/import/normalize/products.ts), and ShortDescriptionRus (JobVN), which is a *description*, not a title - used only as an explicitly-flagged, non-authoritative fallback. Also confirmed: legacy\'s own Import::import() unconditionally overwrites titleRU/RO (and other non-price fields) from the feed on every run (vizaje-legacy-discovery.md section 3, "Импорт может перезаписывать ручные изменения") - V2 must not blindly copy that risk; this is exactly why titleRuRo stays unresolved rather than being reclassified "feed" by default.'
 	},
-	ingredientsInstructions: { owner: 'unresolved', note: 'Unresolved (Task 7) - no confirmed source field.' },
-	categoryMapping: { owner: 'unresolved', note: 'Unresolved (Task 7) - no confirmed legacy category feed/table was inspected this sprint.' },
+	ingredientsInstructions: {
+		owner: 'unresolved',
+		note: 'Partially confirmed: MySQL destination columns exist (products.instructionRU/RO/EN, componentsRU/RO/EN) and vizaje-legacy-discovery.md states the legacy importer updates them from the feed - but no instruction/components field name appears in any of the three supplied samples. Destination confirmed, source field name NOT confirmed.'
+	},
+	categoryMapping: {
+		owner: 'unresolved',
+		note: 'Partially confirmed: product_categories is a real many-to-many junction table in MySQL (product_id, category_id, UNIQUE(product_id, category_id)) - structurally a near-exact match for V2\'s own product_categories table. categories.GUID is a confirmed column but has NO index at all (not even non-unique) in the supplied schema, and no category-bearing feed field was present in any of the three samples. Matching strategy (by GUID vs by name) is still undecided and no legacy category feed was inspected.'
+	},
 	promotionalReferencePrice: {
 		owner: 'unresolved',
-		note: 'Unresolved (Task 7) - which observed price (PriceWH? DiscountPrice?) should ever populate V2\'s compare_at_price, if any, is undecided. Also out of scope for any writes this sprint regardless.'
+		note: 'Confirmed fields exist (DiscountPrice in pricevn.json, discount_price in MySQL products/products_variable) but every sample DiscountPrice is 0, which is ambiguous between "no active discount" and "a genuine zero price" - cannot be resolved from the supplied samples alone. Also out of scope for any writes this sprint regardless (Task 4 restriction: no real price synchronization).'
 	},
 	variantGroupNaming: {
 		owner: 'unresolved',
-		note: 'Unresolved (Task 7) - whether VariativeName should ever become the V2 product\'s own title, or stay purely an internal grouping label, is undecided.'
+		note: 'Evidence now supports VariativeName as a reasonable *working* parent-product title (confirmed via the real ANNY group: "NAIL POLISH ANNY" shared by ID_nom 10568/10516/10559) and src/import/normalize/products.ts already uses it that way by default. Still unresolved whether this should become the *permanent, curated* V2 title (vs. a pure internal grouping label later replaced by a MySQL-sourced title) - that decision belongs to the store owner, not this importer.'
 	}
 }
 

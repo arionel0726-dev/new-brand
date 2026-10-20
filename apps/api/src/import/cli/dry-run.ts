@@ -1,8 +1,9 @@
 /**
- * Legacy import dry-run CLI (Sprint 10A Task 8).
+ * Legacy import dry-run CLI (Sprint 10A Task 8, enrichment support added
+ * in Sprint 10A.1).
  *
  * Usage:
- *   bun run import:legacy:dry-run -- --type=products --file=./path/to/feed.json [--source=1c] [--persist-report]
+ *   bun run import:legacy:dry-run -- --type=products --file=./path/to/feed.json [--source=1c] [--persist-report] [--enrichment=./path/to/enrichment.json]
  *
  * --type         one of: products, pricevn, jobvn_seo
  * --file         path to a JSON file containing a top-level array of feed records
@@ -10,6 +11,12 @@
  * --persist-report  write an import_runs + import_record_issues audit trail
  *                    (default: off - a dry-run touches the database not at
  *                    all unless this is explicitly passed; see Task 8)
+ * --enrichment   (products feed only) path to a JSON file shaped
+ *                {"mysqlTitles": {"<ID_nom>": {"titleRu": "...", "titleRo": "..."}},
+ *                 "shortDescriptions": {"<ID_nom>": "..."}}
+ *                - optional, source-aware title resolution (Task 3). Never
+ *                required; omitting it reproduces the conservative
+ *                Sprint 10A behavior (every title-less candidate blocked).
  *
  * Never writes to any catalog table, never calls Meilisearch, never
  * touches R2, regardless of --persist-report.
@@ -17,6 +24,32 @@
 import { queryClient } from '../../db/client'
 import { FEED_TYPES, SOURCE_SYSTEMS, type FeedType, type SourceSystem } from '../constants'
 import { runDryRun } from '../dry-run'
+import type { ProductNameEnrichment } from '../normalize/products'
+
+type EnrichmentFile = {
+	mysqlTitles?: Record<string, { titleRu?: string | null; titleRo?: string | null }>
+	shortDescriptions?: Record<string, string | null>
+}
+
+async function loadEnrichment(path: string | null): Promise<ProductNameEnrichment | undefined> {
+	if (!path) return undefined
+	const file = Bun.file(path)
+	if (!(await file.exists())) {
+		console.error(`Enrichment file not found: ${path}`)
+		process.exit(1)
+	}
+	const parsed = JSON.parse(await file.text()) as EnrichmentFile
+	const mysqlTitles = parsed.mysqlTitles
+		? new Map(
+				Object.entries(parsed.mysqlTitles).map(([idNom, value]) => [
+					idNom,
+					{ titleRu: value.titleRu ?? null, titleRo: value.titleRo ?? null }
+				])
+			)
+		: undefined
+	const shortDescriptions = parsed.shortDescriptions ? new Map(Object.entries(parsed.shortDescriptions)) : undefined
+	return { mysqlTitles, shortDescriptions }
+}
 
 // A practical, explicit safe-default limit (Task 8: "safe default limits
 // and support large files without unbounded memory usage where
@@ -27,20 +60,28 @@ import { runDryRun } from '../dry-run'
 // implemented this sprint - see docs/vizaje-migration-architecture.md.
 const MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024
 
-function parseArgs(argv: string[]): { type: string | null; file: string | null; source: string; persistReport: boolean } {
+function parseArgs(argv: string[]): {
+	type: string | null
+	file: string | null
+	source: string
+	persistReport: boolean
+	enrichmentPath: string | null
+} {
 	let type: string | null = null
 	let file: string | null = null
 	let source = '1c'
 	let persistReport = false
+	let enrichmentPath: string | null = null
 
 	for (const arg of argv) {
 		if (arg.startsWith('--type=')) type = arg.slice('--type='.length)
 		else if (arg.startsWith('--file=')) file = arg.slice('--file='.length)
 		else if (arg.startsWith('--source=')) source = arg.slice('--source='.length)
 		else if (arg === '--persist-report') persistReport = true
+		else if (arg.startsWith('--enrichment=')) enrichmentPath = arg.slice('--enrichment='.length)
 	}
 
-	return { type, file, source, persistReport }
+	return { type, file, source, persistReport, enrichmentPath }
 }
 
 function isFeedType(value: string): value is FeedType {
@@ -52,7 +93,7 @@ function isSourceSystem(value: string): value is SourceSystem {
 }
 
 async function main() {
-	const { type, file, source, persistReport } = parseArgs(process.argv.slice(2))
+	const { type, file, source, persistReport, enrichmentPath } = parseArgs(process.argv.slice(2))
 
 	if (!type || !file) {
 		console.error(
@@ -90,7 +131,8 @@ async function main() {
 		process.exit(1)
 	}
 
-	const result = await runDryRun({ feedType: type, sourceSystem: source, payload, persistReport })
+	const nameEnrichment = await loadEnrichment(enrichmentPath)
+	const result = await runDryRun({ feedType: type, sourceSystem: source, payload, persistReport, nameEnrichment })
 
 	console.log(JSON.stringify(result.summary, null, 2))
 	if (result.rejectedSamples.length > 0) {
