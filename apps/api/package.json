@@ -8,6 +8,7 @@
     "auth:set-role": "bun run src/auth/set-role.ts",
     "media:cleanup": "bun run src/media/cleanup.ts",
     "import:legacy:dry-run": "bun run src/import/cli/dry-run.ts",
+    "import:legacy:catalog-dry-run": "bun run src/import/cli/catalog-dry-run.ts",
     "test": "bun test"
   },
   "dependencies": {
