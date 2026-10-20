@@ -57,6 +57,13 @@
       "when": 1792475204537,
       "tag": "0007_brief_next_avengers",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792486087752,
+      "tag": "0008_adorable_dreaming_celestial",
+      "breakpoints": true
     }
   ]
 }

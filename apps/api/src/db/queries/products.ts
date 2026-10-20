@@ -29,7 +29,7 @@ export type ProductListFilters = {
 // off, and a newly created active variant may not be priced yet.
 const PUBLISHED_VARIANT_CONDITION = eq(productVariants.isActive, true)
 
-const priceAggregate = db
+export const priceAggregate = db
 	.select({
 		productId: productVariants.productId,
 		minPrice: sql<number>`min(${productPrices.price})`.as('min_price'),
