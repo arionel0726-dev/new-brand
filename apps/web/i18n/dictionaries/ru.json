@@ -1,0 +1,114 @@
+{
+	"brand": {
+		"name": "VIZAJE-NICA"
+	},
+	"nav": {
+		"catalog": "Каталог",
+		"brands": "Бренды",
+		"discounts": "Скидки",
+		"stores": "Магазины",
+		"search": "Поиск",
+		"account": "Профиль",
+		"wishlist": "Избранное",
+		"cart": "Корзина",
+		"menu": "Меню",
+		"close": "Закрыть",
+		"perfume": "Парфюмерия",
+		"makeup": "Макияж",
+		"skincare": "Уход за кожей",
+		"haircare": "Уход за волосами"
+	},
+	"announcement": {
+		"freeDelivery": "Бесплатная доставка при заказе от {amount}"
+	},
+	"home": {
+		"heroCta": "Смотреть каталог",
+		"featuredCategories": "Категории",
+		"discounts": "Скидки",
+		"bestsellers": "Хиты продаж",
+		"newArrivals": "Новинки",
+		"featuredBrands": "Бренды",
+		"bonusProgram": "Бонусная программа",
+		"bonusProgramText": "Копите бонусы с каждой покупкой и оплачивайте ими часть следующего заказа.",
+		"omnichannel": "Магазин онлайн и офлайн",
+		"omnichannelText": "Заказывайте на сайте или выбирайте товар в одном из наших магазинов."
+	},
+	"product": {
+		"new": "Новинка",
+		"hit": "Хит",
+		"sale": "Скидка",
+		"outOfStock": "Нет в наличии",
+		"inStock": "В наличии",
+		"addToCart": "В корзину",
+		"addedToCart": "Добавлено",
+		"wishlistAdd": "В избранное",
+		"wishlistRemove": "Убрать из избранного",
+		"volume": "Объём",
+		"shade": "Оттенок",
+		"variant": "Вариант",
+		"details": "Описание",
+		"breadcrumbHome": "Главная"
+	},
+	"catalog": {
+		"title": "Каталог",
+		"filters": "Фильтры",
+		"sort": "Сортировка",
+		"sortNewest": "Сначала новые",
+		"sortPriceAsc": "Сначала дешевле",
+		"sortPriceDesc": "Сначала дороже",
+		"sortNameAsc": "По названию",
+		"availability": "Наличие",
+		"availabilityInStock": "Только в наличии",
+		"priceRange": "Цена",
+		"category": "Категория",
+		"brand": "Бренд",
+		"apply": "Показать",
+		"reset": "Сбросить",
+		"empty": "По вашему запросу ничего не найдено",
+		"loadMore": "Показать ещё",
+		"resultsCount": "{count} товаров"
+	},
+	"brands": {
+		"title": "Бренды",
+		"searchPlaceholder": "Найти бренд",
+		"allLetters": "Все",
+		"empty": "Бренды не найдены",
+		"products": "Товары бренда"
+	},
+	"stores": {
+		"title": "Магазины",
+		"listView": "Список",
+		"mapView": "Карта",
+		"hours": "Часы работы",
+		"phone": "Телефон",
+		"address": "Адрес",
+		"devDataNotice": "Демонстрационные данные для разработки — не являются реальными адресами магазинов"
+	},
+	"search": {
+		"title": "Поиск",
+		"placeholder": "Искать товары, бренды, категории",
+		"empty": "Ничего не найдено",
+		"resultsCount": "{count} результатов",
+		"recent": "Недавние запросы"
+	},
+	"footer": {
+		"company": "Компания",
+		"aboutUs": "О нас",
+		"stores": "Магазины",
+		"support": "Поддержка",
+		"delivery": "Доставка",
+		"payment": "Оплата",
+		"returns": "Возврат",
+		"contacts": "Контакты",
+		"contactsPlaceholder": "Контактная информация уточняется",
+		"legal": "Правовая информация",
+		"terms": "Условия использования",
+		"privacy": "Политика конфиденциальности",
+		"social": "Мы в соцсетях",
+		"socialPlaceholder": "Ссылки на соцсети будут добавлены",
+		"rights": "Все права защищены"
+	},
+	"a11y": {
+		"skipToContent": "Перейти к содержимому"
+	}
+}

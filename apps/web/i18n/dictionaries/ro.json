@@ -1,0 +1,114 @@
+{
+	"brand": {
+		"name": "VIZAJE-NICA"
+	},
+	"nav": {
+		"catalog": "Catalog",
+		"brands": "Branduri",
+		"discounts": "Reduceri",
+		"stores": "Magazine",
+		"search": "Căutare",
+		"account": "Cont",
+		"wishlist": "Favorite",
+		"cart": "Coș",
+		"menu": "Meniu",
+		"close": "Închide",
+		"perfume": "Parfumerie",
+		"makeup": "Machiaj",
+		"skincare": "Îngrijirea pielii",
+		"haircare": "Îngrijirea părului"
+	},
+	"announcement": {
+		"freeDelivery": "Livrare gratuită la comenzi de la {amount}"
+	},
+	"home": {
+		"heroCta": "Vezi catalogul",
+		"featuredCategories": "Categorii",
+		"discounts": "Reduceri",
+		"bestsellers": "Cele mai vândute",
+		"newArrivals": "Noutăți",
+		"featuredBrands": "Branduri",
+		"bonusProgram": "Program de bonusuri",
+		"bonusProgramText": "Acumulați bonusuri la fiecare achiziție și plătiți o parte din comanda următoare cu ele.",
+		"omnichannel": "Online și în magazin",
+		"omnichannelText": "Comandați pe site sau alegeți produsul într-unul din magazinele noastre."
+	},
+	"product": {
+		"new": "Noutate",
+		"hit": "Hit",
+		"sale": "Reducere",
+		"outOfStock": "Stoc epuizat",
+		"inStock": "În stoc",
+		"addToCart": "Adaugă în coș",
+		"addedToCart": "Adăugat",
+		"wishlistAdd": "Adaugă la favorite",
+		"wishlistRemove": "Elimină din favorite",
+		"volume": "Volum",
+		"shade": "Nuanță",
+		"variant": "Variantă",
+		"details": "Descriere",
+		"breadcrumbHome": "Acasă"
+	},
+	"catalog": {
+		"title": "Catalog",
+		"filters": "Filtre",
+		"sort": "Sortare",
+		"sortNewest": "Cele mai noi",
+		"sortPriceAsc": "Preț crescător",
+		"sortPriceDesc": "Preț descrescător",
+		"sortNameAsc": "După denumire",
+		"availability": "Disponibilitate",
+		"availabilityInStock": "Doar în stoc",
+		"priceRange": "Preț",
+		"category": "Categorie",
+		"brand": "Brand",
+		"apply": "Afișează",
+		"reset": "Resetează",
+		"empty": "Nu am găsit nimic după criteriile selectate",
+		"loadMore": "Arată mai mult",
+		"resultsCount": "{count} produse"
+	},
+	"brands": {
+		"title": "Branduri",
+		"searchPlaceholder": "Caută un brand",
+		"allLetters": "Toate",
+		"empty": "Nu am găsit branduri",
+		"products": "Produsele brandului"
+	},
+	"stores": {
+		"title": "Magazine",
+		"listView": "Listă",
+		"mapView": "Hartă",
+		"hours": "Program",
+		"phone": "Telefon",
+		"address": "Adresă",
+		"devDataNotice": "Date demonstrative pentru dezvoltare — nu sunt adresele reale ale magazinelor"
+	},
+	"search": {
+		"title": "Căutare",
+		"placeholder": "Caută produse, branduri, categorii",
+		"empty": "Nu am găsit rezultate",
+		"resultsCount": "{count} rezultate",
+		"recent": "Căutări recente"
+	},
+	"footer": {
+		"company": "Companie",
+		"aboutUs": "Despre noi",
+		"stores": "Magazine",
+		"support": "Suport",
+		"delivery": "Livrare",
+		"payment": "Plată",
+		"returns": "Retur",
+		"contacts": "Contacte",
+		"contactsPlaceholder": "Datele de contact urmează să fie completate",
+		"legal": "Informații legale",
+		"terms": "Termeni și condiții",
+		"privacy": "Politica de confidențialitate",
+		"social": "Rețele sociale",
+		"socialPlaceholder": "Linkurile către rețelele sociale vor fi adăugate",
+		"rights": "Toate drepturile rezervate"
+	},
+	"a11y": {
+		"skipToContent": "Sari la conținut"
+	}
+}
