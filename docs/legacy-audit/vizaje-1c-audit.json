@@ -1,0 +1,760 @@
+{
+  "scope": "Aggregate JSON counts; no raw records or identifiers; not SQL↔1C reconciliation",
+  "files": {
+    "products.json": {
+      "rows": 18057,
+      "field_coverage": {
+        "BalAtrium": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalELAT": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalG3": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalGRHILLS": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalMall": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalNR1": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalSC1": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalSC3": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalSOIUZ": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalUNIC": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "BalUNIC1": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "Barcode": {
+          "present": 18057,
+          "blank_or_null": 21
+        },
+        "Brand": {
+          "present": 18057,
+          "blank_or_null": 1477
+        },
+        "ColorVar": {
+          "present": 18057,
+          "blank_or_null": 11230
+        },
+        "ColorVarMD": {
+          "present": 18057,
+          "blank_or_null": 11233
+        },
+        "FullDescriptionMD": {
+          "present": 18057,
+          "blank_or_null": 9217
+        },
+        "FullDescriptionRus": {
+          "present": 18057,
+          "blank_or_null": 9163
+        },
+        "ID_nom": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "InstructionMD": {
+          "present": 18057,
+          "blank_or_null": 12232
+        },
+        "InstructionRU": {
+          "present": 18057,
+          "blank_or_null": 12221
+        },
+        "NomenclatureCategory1": {
+          "present": 18057,
+          "blank_or_null": 2414
+        },
+        "NomenclatureCategory1Parent": {
+          "present": 18057,
+          "blank_or_null": 2441
+        },
+        "NomenclatureCategory1Parent2": {
+          "present": 18057,
+          "blank_or_null": 4286
+        },
+        "NomenclatureCategory2": {
+          "present": 18057,
+          "blank_or_null": 16473
+        },
+        "NomenclatureCategory2Parent": {
+          "present": 18057,
+          "blank_or_null": 16519
+        },
+        "NomenclatureCategory2Parent2": {
+          "present": 18057,
+          "blank_or_null": 17011
+        },
+        "NomenclatureCategory3": {
+          "present": 18057,
+          "blank_or_null": 17038
+        },
+        "NomenclatureCategory3Parent": {
+          "present": 18057,
+          "blank_or_null": 17057
+        },
+        "NomenclatureCategory3Parent2": {
+          "present": 18057,
+          "blank_or_null": 17536
+        },
+        "Planks": {
+          "present": 18057,
+          "blank_or_null": 18049
+        },
+        "Price": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "PriceWH": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "QuantityBalance": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "SeoDescriptionRO": {
+          "present": 18057,
+          "blank_or_null": 17524
+        },
+        "SeoDescriptionRU": {
+          "present": 18057,
+          "blank_or_null": 17524
+        },
+        "SeoHeaderRO": {
+          "present": 18057,
+          "blank_or_null": 17531
+        },
+        "SeoHeaderRU": {
+          "present": 18057,
+          "blank_or_null": 17531
+        },
+        "SeoKeyWordsRO": {
+          "present": 18057,
+          "blank_or_null": 18018
+        },
+        "SeoKeyWordsRU": {
+          "present": 18057,
+          "blank_or_null": 18018
+        },
+        "Sex": {
+          "present": 18057,
+          "blank_or_null": 91
+        },
+        "ShortDescriptionMD": {
+          "present": 18057,
+          "blank_or_null": 10959
+        },
+        "ShortDescriptionRus": {
+          "present": 18057,
+          "blank_or_null": 10936
+        },
+        "VariativeName": {
+          "present": 18057,
+          "blank_or_null": 9745
+        },
+        "VariativeNameMD": {
+          "present": 18057,
+          "blank_or_null": 9745
+        },
+        "VariativeNomenclature": {
+          "present": 18057,
+          "blank_or_null": 9830
+        },
+        "VolumeVar": {
+          "present": 18057,
+          "blank_or_null": 6888
+        },
+        "WarehouseName": {
+          "present": 18057,
+          "blank_or_null": 0
+        },
+        "componentsMD": {
+          "present": 18057,
+          "blank_or_null": 12245
+        },
+        "componentsRu": {
+          "present": 18057,
+          "blank_or_null": 12238
+        }
+      },
+      "identifiers": {
+        "ID_nom": {
+          "populated": 18057,
+          "distinct": 17234,
+          "duplicate_groups": 771,
+          "rows_in_duplicate_groups": 1594
+        },
+        "Barcode": {
+          "populated": 18036,
+          "distinct": 17472,
+          "duplicate_groups": 5,
+          "rows_in_duplicate_groups": 569
+        },
+        "VariativeNomenclature": {
+          "populated": 8227,
+          "distinct": 1536,
+          "duplicate_groups": 1478,
+          "rows_in_duplicate_groups": 8169
+        }
+      }
+    },
+    "pricevn.json": {
+      "rows": 17338,
+      "field_coverage": {
+        "DiscountPrice": {
+          "present": 17338,
+          "blank_or_null": 0
+        },
+        "ID_nom": {
+          "present": 17338,
+          "blank_or_null": 0
+        },
+        "Price": {
+          "present": 17338,
+          "blank_or_null": 0
+        },
+        "VariativeNomenclature": {
+          "present": 17338,
+          "blank_or_null": 9498
+        }
+      },
+      "identifiers": {
+        "ID_nom": {
+          "populated": 17338,
+          "distinct": 17253,
+          "duplicate_groups": 84,
+          "rows_in_duplicate_groups": 169
+        },
+        "VariativeNomenclature": {
+          "populated": 7840,
+          "distinct": 1536,
+          "duplicate_groups": 1477,
+          "rows_in_duplicate_groups": 7781
+        }
+      }
+    },
+    "JobVN.json": {
+      "rows": 11423,
+      "field_coverage": {
+        "BalAtrium": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalELAT": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalG3": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalGRHILLS": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalMall": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalNR1": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalSC1": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalSC3": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalSOIUZ": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalUNIC": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "BalUNIC1": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "Barcode": {
+          "present": 11423,
+          "blank_or_null": 10
+        },
+        "Brand": {
+          "present": 11423,
+          "blank_or_null": 64
+        },
+        "ColorVar": {
+          "present": 11423,
+          "blank_or_null": 7199
+        },
+        "ColorVarMD": {
+          "present": 11423,
+          "blank_or_null": 7206
+        },
+        "FullDescriptionMD": {
+          "present": 11423,
+          "blank_or_null": 4661
+        },
+        "FullDescriptionRus": {
+          "present": 11423,
+          "blank_or_null": 4564
+        },
+        "ID_nom": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "InstructionMD": {
+          "present": 11423,
+          "blank_or_null": 7252
+        },
+        "InstructionRU": {
+          "present": 11423,
+          "blank_or_null": 7213
+        },
+        "NomenclatureCategory1": {
+          "present": 11423,
+          "blank_or_null": 962
+        },
+        "NomenclatureCategory1Parent": {
+          "present": 11423,
+          "blank_or_null": 974
+        },
+        "NomenclatureCategory1Parent2": {
+          "present": 11423,
+          "blank_or_null": 2202
+        },
+        "NomenclatureCategory2": {
+          "present": 11423,
+          "blank_or_null": 10357
+        },
+        "NomenclatureCategory2Parent": {
+          "present": 11423,
+          "blank_or_null": 10392
+        },
+        "NomenclatureCategory2Parent2": {
+          "present": 11423,
+          "blank_or_null": 10668
+        },
+        "NomenclatureCategory3": {
+          "present": 11423,
+          "blank_or_null": 10818
+        },
+        "NomenclatureCategory3Parent": {
+          "present": 11423,
+          "blank_or_null": 10837
+        },
+        "NomenclatureCategory3Parent2": {
+          "present": 11423,
+          "blank_or_null": 11061
+        },
+        "Planks": {
+          "present": 11423,
+          "blank_or_null": 11423
+        },
+        "Price": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "PriceWH": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "QuantityBalance": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "SeoDescriptionRO": {
+          "present": 11423,
+          "blank_or_null": 11423
+        },
+        "SeoDescriptionRU": {
+          "present": 11423,
+          "blank_or_null": 11423
+        },
+        "SeoHeaderRO": {
+          "present": 11423,
+          "blank_or_null": 11423
+        },
+        "SeoHeaderRU": {
+          "present": 11423,
+          "blank_or_null": 11423
+        },
+        "SeoKeyWordsRO": {
+          "present": 11423,
+          "blank_or_null": 11423
+        },
+        "SeoKeyWordsRU": {
+          "present": 11423,
+          "blank_or_null": 11423
+        },
+        "ShortDescriptionMD": {
+          "present": 11423,
+          "blank_or_null": 6600
+        },
+        "ShortDescriptionRus": {
+          "present": 11423,
+          "blank_or_null": 6579
+        },
+        "VariativeName": {
+          "present": 11423,
+          "blank_or_null": 6119
+        },
+        "VariativeNameMD": {
+          "present": 11423,
+          "blank_or_null": 6119
+        },
+        "VariativeNomenclature": {
+          "present": 11423,
+          "blank_or_null": 6211
+        },
+        "VolumeVar": {
+          "present": 11423,
+          "blank_or_null": 4740
+        },
+        "WarehouseName": {
+          "present": 11423,
+          "blank_or_null": 0
+        },
+        "componentsMD": {
+          "present": 11423,
+          "blank_or_null": 7349
+        },
+        "componentsRu": {
+          "present": 11423,
+          "blank_or_null": 7349
+        }
+      },
+      "identifiers": {
+        "ID_nom": {
+          "populated": 11423,
+          "distinct": 10996,
+          "duplicate_groups": 410,
+          "rows_in_duplicate_groups": 837
+        },
+        "Barcode": {
+          "populated": 11413,
+          "distinct": 11078,
+          "duplicate_groups": 3,
+          "rows_in_duplicate_groups": 338
+        },
+        "VariativeNomenclature": {
+          "populated": 5212,
+          "distinct": 978,
+          "duplicate_groups": 934,
+          "rows_in_duplicate_groups": 5168
+        }
+      }
+    },
+    "old_products.json": {
+      "rows": 703,
+      "field_coverage": {
+        "BalAtrium": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalELAT": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalG3": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalGRHILLS": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalMall": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalNR1": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalSC1": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalSC3": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalSOIUZ": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalUNIC": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "BalUNIC1": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "Barcode": {
+          "present": 703,
+          "blank_or_null": 1
+        },
+        "Brand": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "ColorVar": {
+          "present": 703,
+          "blank_or_null": 181
+        },
+        "ColorVarMD": {
+          "present": 703,
+          "blank_or_null": 181
+        },
+        "FullDescriptionMD": {
+          "present": 703,
+          "blank_or_null": 140
+        },
+        "FullDescriptionRus": {
+          "present": 703,
+          "blank_or_null": 124
+        },
+        "ID_nom": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "InstructionMD": {
+          "present": 703,
+          "blank_or_null": 154
+        },
+        "InstructionRU": {
+          "present": 703,
+          "blank_or_null": 154
+        },
+        "NomenclatureCategory1": {
+          "present": 703,
+          "blank_or_null": 36
+        },
+        "NomenclatureCategory1Parent": {
+          "present": 703,
+          "blank_or_null": 36
+        },
+        "NomenclatureCategory1Parent2": {
+          "present": 703,
+          "blank_or_null": 45
+        },
+        "NomenclatureCategory2": {
+          "present": 703,
+          "blank_or_null": 703
+        },
+        "NomenclatureCategory2Parent": {
+          "present": 703,
+          "blank_or_null": 703
+        },
+        "NomenclatureCategory2Parent2": {
+          "present": 703,
+          "blank_or_null": 703
+        },
+        "NomenclatureCategory3": {
+          "present": 703,
+          "blank_or_null": 703
+        },
+        "NomenclatureCategory3Parent": {
+          "present": 703,
+          "blank_or_null": 703
+        },
+        "NomenclatureCategory3Parent2": {
+          "present": 703,
+          "blank_or_null": 703
+        },
+        "Planks": {
+          "present": 703,
+          "blank_or_null": 703
+        },
+        "Price": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "PriceWH": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "QuantityBalance": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "ShortDescriptionMD": {
+          "present": 703,
+          "blank_or_null": 522
+        },
+        "ShortDescriptionRus": {
+          "present": 703,
+          "blank_or_null": 522
+        },
+        "VariativeName": {
+          "present": 703,
+          "blank_or_null": 180
+        },
+        "VariativeNameMD": {
+          "present": 703,
+          "blank_or_null": 180
+        },
+        "VariativeNomenclature": {
+          "present": 703,
+          "blank_or_null": 180
+        },
+        "VolumeVar": {
+          "present": 703,
+          "blank_or_null": 535
+        },
+        "WarehouseName": {
+          "present": 703,
+          "blank_or_null": 0
+        },
+        "componentsMD": {
+          "present": 703,
+          "blank_or_null": 199
+        },
+        "componentsRu": {
+          "present": 703,
+          "blank_or_null": 199
+        }
+      },
+      "identifiers": {
+        "ID_nom": {
+          "populated": 703,
+          "distinct": 702,
+          "duplicate_groups": 1,
+          "rows_in_duplicate_groups": 2
+        },
+        "Barcode": {
+          "populated": 702,
+          "distinct": 690,
+          "duplicate_groups": 1,
+          "rows_in_duplicate_groups": 13
+        },
+        "VariativeNomenclature": {
+          "populated": 523,
+          "distinct": 66,
+          "duplicate_groups": 64,
+          "rows_in_duplicate_groups": 521
+        }
+      }
+    }
+  },
+  "overlap": {
+    "products.json vs pricevn.json": {
+      "ID_nom": {
+        "shared_distinct": 17234,
+        "left_only": 0,
+        "right_only": 19
+      },
+      "VariativeNomenclature": {
+        "shared_distinct": 1536,
+        "left_only": 0,
+        "right_only": 0
+      }
+    },
+    "products.json vs JobVN.json": {
+      "Barcode": {
+        "shared_distinct": 10838,
+        "left_only": 6634,
+        "right_only": 240
+      },
+      "ID_nom": {
+        "shared_distinct": 10772,
+        "left_only": 6462,
+        "right_only": 224
+      },
+      "VariativeNomenclature": {
+        "shared_distinct": 915,
+        "left_only": 621,
+        "right_only": 63
+      }
+    },
+    "products.json vs old_products.json": {
+      "Barcode": {
+        "shared_distinct": 690,
+        "left_only": 16782,
+        "right_only": 0
+      },
+      "ID_nom": {
+        "shared_distinct": 702,
+        "left_only": 16532,
+        "right_only": 0
+      },
+      "VariativeNomenclature": {
+        "shared_distinct": 63,
+        "left_only": 1473,
+        "right_only": 3
+      }
+    },
+    "pricevn.json vs JobVN.json": {
+      "ID_nom": {
+        "shared_distinct": 10772,
+        "left_only": 6481,
+        "right_only": 224
+      },
+      "VariativeNomenclature": {
+        "shared_distinct": 915,
+        "left_only": 621,
+        "right_only": 63
+      }
+    },
+    "pricevn.json vs old_products.json": {
+      "ID_nom": {
+        "shared_distinct": 702,
+        "left_only": 16551,
+        "right_only": 0
+      },
+      "VariativeNomenclature": {
+        "shared_distinct": 63,
+        "left_only": 1473,
+        "right_only": 3
+      }
+    },
+    "JobVN.json vs old_products.json": {
+      "Barcode": {
+        "shared_distinct": 690,
+        "left_only": 10388,
+        "right_only": 0
+      },
+      "ID_nom": {
+        "shared_distinct": 702,
+        "left_only": 10294,
+        "right_only": 0
+      },
+      "VariativeNomenclature": {
+        "shared_distinct": 65,
+        "left_only": 913,
+        "right_only": 1
+      }
+    }
+  }
+}
