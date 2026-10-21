@@ -73,6 +73,33 @@ describe('formatSkippedUnits', () => {
 		expect(lines).toContain('  detail: parent_id 999 does not exist in the dump')
 	})
 
+	test('Sprint 12B.3.2: a skipped category with per-source counts prints referencingProductCountPrimary and referencingProductCountSecondary as distinct fields', () => {
+		const unit: BootstrapUnitOutcome<'category'> = {
+			kind: 'category',
+			legacyId: 55,
+			legacyName: '',
+			legacyParentId: 999,
+			action: 'skipped',
+			skipReason: 'invalid_parent',
+			note: '',
+			referencingProductCount: 4,
+			referencingProductCountPrimary: 0,
+			referencingProductCountSecondary: 4
+		}
+		const lines = formatSkippedUnits('categories', [unit])
+		const row = lines.find(l => l.startsWith('legacyId=55'))!
+		expect(row).toContain('referencingProductCountPrimary=0')
+		expect(row).toContain('referencingProductCountSecondary=4')
+	})
+
+	test('a skipped BRAND never prints primary/secondary fields, even if present on the unit (brands have no junction-table concept)', () => {
+		const unit = skippedUnit({ legacyId: 162, skipReason: 'empty_title', referencingProductCount: 56 })
+		const lines = formatSkippedUnits('brands', [unit])
+		const row = lines.find(l => l.startsWith('legacyId=162'))!
+		expect(row).not.toContain('referencingProductCountPrimary')
+		expect(row).not.toContain('referencingProductCountSecondary')
+	})
+
 	test('only skipped units appear - created/updated rows are never printed, even mixed in the same batch', () => {
 		const units: BootstrapUnitOutcome<'brand'>[] = [
 			createdUnit(1, 'Anny'),

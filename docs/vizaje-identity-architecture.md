@@ -934,3 +934,29 @@ code (Sprint 6/7) touched.
   up from the Sprint 12B.0 baseline of 438/0/15 by exactly the +20 new
   tests this sprint added, with zero regressions in Cart, Checkout,
   Orders, or Catalog.
+
+## Sprint 12B.3.2 — Legacy Reference Integrity Audit (real bootstrap dry-run findings)
+
+A real local bootstrap dry-run against the user's actual legacy SQL dump
+(not accessible from this environment - findings below are the user's own
+reported numbers, cross-referenced against code-level investigation, never
+fabricated per-product detail) reported:
+
+| Legacy ID | Kind | Reason | Reported detail |
+|---|---|---|---|
+| Brand 162 | brand | `empty_title` | 56 referencing products |
+| Category 4 | category | `invalid_parent` | points at missing parent id 1 |
+| Category 5 | category | `parent_not_resolved` | cascades from category 4's own `invalid_parent` - not a cycle |
+| Categories 27, 32, 55, 71, 101, 102 | category | `invalid_parent` | each points at one of the missing parent ids 1, 26, or 54 (the specific category→parent mapping beyond category 4→1 was not broken out in the chat report; a real re-run with this sprint's fix prints it per-row) |
+
+**Requirement 1/2 — why every skipped category showed `referencingProductCount=not checked`, root cause and fix.** Traced `apps/api/src/import/brand-category-bootstrap.ts`: `productReferenceCounts?.get(legacyId)` is **not** equivalent to "was this checked." When the caller supplies a real, non-null `Map` that simply has no entry for a given id (a genuine, confirmed zero), `.get()` still returns `undefined` - identical to what the expression returns when no map was supplied at all. The CLI (`cli/brand-category-bootstrap.ts`) always passes a real map for both brands and categories, so the check genuinely ran in every case; brand 162 happened to have a nonzero count (56) and so "looked right," while every skipped category apparently has **zero** legacy products directly or indirectly referencing it, which the old code could not distinguish from "never checked." Fixed with a `checkedCount(map, id)` helper (`map ? (map.get(id) ?? 0) : undefined`) applied at every call site in both `bootstrapBrands` and `bootstrapCategories` - the bug was symmetric across both functions, brands were just lucky not to have hit it in the real data shown. Pinned by four new tests in `apps/api/tests/brand-category-bootstrap.test.ts`.
+
+**Requirement 2 — parser/reference-count-building audit.** `extractProductCategories` (`parsers/mysql-catalog.ts`) parses the real `product_categories` junction table (`id`, `product_id`, `category_id`) column-by-name, matching `docs/legacy-reference/vizaje_nica_local.sql`'s real `CREATE TABLE`. The CLI's map-building loop was already structurally correct (it iterates `dump.products` for primary `category_id` and `dump.productCategories` for secondary links) - the defect was entirely in `checkedCount`'s missing/zero distinction, not in how the maps were populated.
+
+**Requirement 3 — primary vs secondary split, implemented.** `bootstrapCategories` now accepts an optional `productReferenceCountsBySource: { primary, secondary }` parameter; each unit carries `referencingProductCountPrimary` and `referencingProductCountSecondary` as distinct fields alongside the existing combined `referencingProductCount`. The CLI builds all three from the parsed dump, deduped by **unique product id** per category (not raw row counts) for both primary and secondary, and the combined count is the union of the two id sets - so a product counted on both sides for the same category is never double-counted. This keeps Sprint 12A.2's "stale primary category_id, valid secondary link" pattern visible instead of hidden inside one merged number. Pinned by three new tests.
+
+**Requirement 4 — origin of missing parent ids 1, 26, 54.** Read `extractCategories` end to end: it is an unconditional `.map()` over every row `parseInsertStatements` finds for the `categories` table - no filter, no validation step that could silently exclude a row (a malformed `id` becomes `-1` via `num(r.id) ?? -1`, it is never dropped). `parseInsertStatements` itself only skips statements for *other* table names, never individual rows within a matched statement. Conclusion: the parser passes every category row through; if ids 1, 26, 54 do not appear as any category's own `id` in the real dump, they are **genuinely absent from the source SQL**, not parser-excluded. This independently confirms Sprint 12A.2/Phase A's "category_id=1 and category_id=54 don't exist" finding from a different angle (the real bootstrap dry-run), and extends it: id 26 is a newly-confirmed third missing parent id not previously on record. A new regression test (`extractCategories passes through every row...`) pins the parser's pass-through behavior directly against a synthetic dump containing a dangling parent reference.
+
+**Requirement 5 — brand 162's impact, quantified (not decided here).** `catalog-importer.ts` already sets `unpublishedForMissingBrand: brandId === null` - a product referencing an unresolved brand (brand 162's `empty_title` skip means no `legacy_mysql/brand/162` mapping ever resolves) cannot reach `active` status. Per the user's own real dry-run: **56 real catalog products are blocked from publication until brand 162 is resolved** - either by sourcing its real name from elsewhere (not available in this SQL dump alone) or an explicit business decision. No brand name is invented here or anywhere in the codebase for id 162.
+
+**Requirement 7 — nothing auto-changed.** All of the above are reporting-only changes: no parent link, brand assignment, or publication status is ever written automatically. Confirmed by a new test asserting an `invalid_parent` category with nonzero referencing-product counts is still fully skipped, never force-rooted, with zero rows written to `categories`.

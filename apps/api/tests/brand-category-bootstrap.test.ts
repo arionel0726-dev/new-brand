@@ -15,7 +15,7 @@ import { assertSafeImportTarget, runCatalogImport, type CatalogImportInput } fro
 import { classifyIdNomDuplicates } from '../src/import/reconcile/duplicate-id-nom'
 import { reconcileFamilies } from '../src/import/reconcile/family-reconciliation'
 import { reconcileSqlWith1c } from '../src/import/reconcile/sql-1c-reconciliation'
-import type { LegacyBrand, LegacyCatalogDump, LegacyCategory, LegacyProduct } from '../src/import/parsers/mysql-catalog'
+import { extractCategories, type LegacyBrand, type LegacyCatalogDump, type LegacyCategory, type LegacyProduct } from '../src/import/parsers/mysql-catalog'
 import { parseProductsFeed } from '../src/import/parsers/products-feed'
 import { resetDatabase } from './helpers'
 
@@ -483,5 +483,102 @@ describe('Important-A: quarantinedPositionsTotal vs bySkipReason.quarantine (12B
 		// certainly compares a post-fix number against a PRE-fix run (the old
 		// lumped-family counting this test would have failed against).
 		expect(result.summary.quarantinedPositionsTotal).toBe(result.summary.bySkipReason.quarantine)
+	})
+})
+
+describe('Sprint 12B.3.2 Requirement 1: referencingProductCount distinguishes "0 confirmed" from "not checked"', () => {
+	test('a supplied map with no entry for this legacy id reports a confirmed 0, never "not checked" - the exact real-run bug (brand 162 showed 56 correctly, every skipped category showed "not checked" even though the map was always supplied)', async () => {
+		const emptyMapButSupplied = new Map<number, number>()
+		const result = await db.transaction(tx => bootstrapBrands(tx, [makeBrand({ id: 162, title: '' })], 'write', emptyMapButSupplied))
+		expect(result.units[0].skipReason).toBe('empty_title')
+		expect(result.units[0].referencingProductCount).toBe(0)
+	})
+
+	test('an entry present in the supplied map still reports its real count (brand 162-shaped case: nonzero references)', async () => {
+		const result = await db.transaction(tx => bootstrapBrands(tx, [makeBrand({ id: 162, title: '' })], 'write', new Map([[162, 56]])))
+		expect(result.units[0].referencingProductCount).toBe(56)
+	})
+
+	test('omitting the map entirely still reports "not checked" (undefined), never silently reads as 0', async () => {
+		const result = await db.transaction(tx => bootstrapBrands(tx, [makeBrand({ id: 163, title: '' })], 'write'))
+		expect(result.units[0].referencingProductCount).toBeUndefined()
+	})
+
+	test('the same distinction holds for categories: a supplied-but-empty map reports a confirmed 0 for an invalid_parent skip', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapCategories(tx, [makeCategory({ id: 4, parentId: 999 })], 'write', new Map<number, number>())
+		)
+		expect(result.units[0].skipReason).toBe('invalid_parent')
+		expect(result.units[0].referencingProductCount).toBe(0)
+	})
+})
+
+describe('Sprint 12B.3.2 Requirement 3: primary vs secondary category membership reported separately', () => {
+	test('a category reports primary and secondary unique-product counts as distinct fields, not merged into one', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapCategories(tx, [makeCategory({ id: 4, parentId: 999 })], 'write', new Map([[4, 3]]), {
+				primary: new Map([[4, 1]]),
+				secondary: new Map([[4, 2]])
+			})
+		)
+		const unit = result.units[0]
+		expect(unit.referencingProductCount).toBe(3)
+		expect(unit.referencingProductCountPrimary).toBe(1)
+		expect(unit.referencingProductCountSecondary).toBe(2)
+	})
+
+	test('a category with zero primary but nonzero secondary membership is NOT reported as fully unused - Sprint 12A.2\'s "stale primary, valid secondary" pattern stays visible', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapCategories(tx, [makeCategory({ id: 55, parentId: 999 })], 'write', new Map([[55, 4]]), {
+				primary: new Map(), // supplied, genuinely zero primary references
+				secondary: new Map([[55, 4]])
+			})
+		)
+		const unit = result.units[0]
+		expect(unit.referencingProductCountPrimary).toBe(0)
+		expect(unit.referencingProductCountSecondary).toBe(4)
+	})
+
+	test('omitting the per-source maps leaves both primary and secondary undefined ("not checked"), independent of the combined count', async () => {
+		const result = await db.transaction(tx => bootstrapCategories(tx, [makeCategory({ id: 4, parentId: 999 })], 'write', new Map([[4, 3]])))
+		const unit = result.units[0]
+		expect(unit.referencingProductCount).toBe(3)
+		expect(unit.referencingProductCountPrimary).toBeUndefined()
+		expect(unit.referencingProductCountSecondary).toBeUndefined()
+	})
+})
+
+describe('Sprint 12B.3.2 Requirement 4: the parser never silently drops a category row', () => {
+	test('extractCategories passes through every row found in the dump, including one whose id is never referenced as anyone\'s parent and one that is only ever referenced as a (missing) parent - neither is dropped nor substituted', () => {
+		const sql = `
+INSERT INTO \`categories\` (\`id\`, \`GUID\`, \`parent_id\`, \`titleRU\`, \`titleRO\`, \`uriRU\`, \`uriRO\`, \`descRU\`, \`descRO\`, \`seoTitleRU\`, \`seoTitleRO\`, \`isShown\`, \`sorder\`) VALUES
+(4, NULL, 1, 'Makeup', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 0),
+(5, NULL, 4, 'Lips', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 0);
+`
+		const categories = extractCategories(sql)
+		// Both real rows present - the parser itself never excludes a row it
+		// parsed; it is the REFERENCED id 1 (category 4's declared parent)
+		// that is genuinely absent from this dump, which is a data fact, not
+		// a parsing defect. This directly confirms Sprint 12B.3.2 Requirement
+		// 4's finding: extractCategories has no filter/validation step that
+		// could silently drop a row - it is an unconditional .map() over
+		// every INSERT row found for the `categories` table.
+		expect(categories.map(c => c.id).sort()).toEqual([4, 5])
+		expect(categories.find(c => c.id === 1)).toBeUndefined()
+	})
+})
+
+describe('Sprint 12B.3.2 Requirement 7: nothing is auto-changed by these diagnostic improvements', () => {
+	test('an invalid_parent category is still reported, never force-rooted or given a fabricated parent, regardless of its referencing counts', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapCategories(tx, [makeCategory({ id: 27, parentId: 1, titleRu: 'Broken' })], 'write', new Map([[27, 10]]), {
+				primary: new Map([[27, 10]]),
+				secondary: new Map()
+			})
+		)
+		expect(result.summary.created).toBe(0)
+		expect(result.units[0].skipReason).toBe('invalid_parent')
+		const rows = await db.select().from(categories)
+		expect(rows).toHaveLength(0)
 	})
 })

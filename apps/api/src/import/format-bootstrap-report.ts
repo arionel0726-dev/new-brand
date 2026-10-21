@@ -24,15 +24,22 @@ export function formatSkippedUnits(label: string, units: BootstrapUnitOutcome<'b
 	}
 
 	for (const unit of skipped) {
-		lines.push(
-			[
-				`legacyId=${unit.legacyId}`,
-				`legacyName=${JSON.stringify(unit.legacyName)}`,
-				`legacyParentId=${unit.legacyParentId ?? 'null'}`,
-				`skipReason=${unit.skipReason ?? 'unknown'}`,
-				`referencingProductCount=${unit.referencingProductCount ?? 'not checked'}`
-			].join(' | ')
-		)
+		const parts = [
+			`legacyId=${unit.legacyId}`,
+			`legacyName=${JSON.stringify(unit.legacyName)}`,
+			`legacyParentId=${unit.legacyParentId ?? 'null'}`,
+			`skipReason=${unit.skipReason ?? 'unknown'}`,
+			`referencingProductCount=${unit.referencingProductCount ?? 'not checked'}`
+		]
+		// Sprint 12B.3.2 Requirement 3: only printed for categories (brands have
+		// no secondary/junction-table membership concept) and only when the
+		// caller actually supplied the per-source maps - otherwise this stays
+		// silent rather than printing two more "not checked" fields nobody asked for.
+		if (unit.kind === 'category' && (unit.referencingProductCountPrimary !== undefined || unit.referencingProductCountSecondary !== undefined)) {
+			parts.push(`referencingProductCountPrimary=${unit.referencingProductCountPrimary ?? 'not checked'}`)
+			parts.push(`referencingProductCountSecondary=${unit.referencingProductCountSecondary ?? 'not checked'}`)
+		}
+		lines.push(parts.join(' | '))
 		if (unit.skipDetail) lines.push(`  detail: ${unit.skipDetail}`)
 	}
 

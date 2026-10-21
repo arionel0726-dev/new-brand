@@ -89,6 +89,40 @@ export type BootstrapUnitOutcome<Kind extends 'brand' | 'category'> = {
 	note: string
 	/** Requirement 1/5: how many legacy product rows reference this legacy brand_id/category_id, when the caller supplies a cross-reference map (see bootstrapBrands/bootstrapCategories' optional `productReferenceCounts` param). Undefined (not 0) when no cross-reference was supplied, so "0 known references" is never confused with "not checked". */
 	referencingProductCount?: number
+	/**
+	 * Category only (Sprint 12B.3.2 Requirement 3): the same "0 vs not
+	 * checked" split as `referencingProductCount`, but separated by how the
+	 * reference exists in the legacy schema - PRIMARY is `products.category_id`
+	 * pointing directly at this category; SECONDARY is a `product_categories`
+	 * junction-table row. A product can have a stale/broken primary
+	 * category_id while still carrying a valid secondary link (the exact
+	 * pattern Sprint 12A.2 found for 30/33 products), so merging the two
+	 * counts into one would hide that a category some products still
+	 * genuinely depend on (via the junction table) looks unused by primary
+	 * assignment alone. Undefined (not 0) only when the caller supplied no
+	 * per-source maps at all.
+	 */
+	referencingProductCountPrimary?: number
+	referencingProductCountSecondary?: number
+}
+
+/**
+ * Sprint 12B.3.2 fix: `map?.get(id)` is NOT the same as "not checked" - when
+ * `map` is a real, supplied Map that simply has no entry for `id` (a
+ * genuine, confirmed zero), `.get()` still returns `undefined`, identical to
+ * what `productReferenceCounts?.get(id)` returns when no map was supplied at
+ * all. The real dry-run exposed this directly: brand 162 correctly showed
+ * `56` (it happens to have nonzero references), but every one of the 7
+ * invalid_parent / 1 parent_not_resolved categories showed "not checked" -
+ * not because the cross-reference check never ran (the CLI always passes a
+ * real Map), but because those specific category ids simply have zero
+ * entries in it, and the old `map?.get(id)` expression could not tell the
+ * difference. This helper makes the distinction explicit: a supplied map
+ * with no entry resolves to a confirmed `0`; only a genuinely absent map
+ * (the caller never supplied one) yields `undefined`.
+ */
+function checkedCount(map: Map<number, number> | undefined, id: number): number | undefined {
+	return map ? (map.get(id) ?? 0) : undefined
 }
 
 export type BrandBootstrapSummary = {
@@ -125,9 +159,23 @@ function skip<Kind extends 'brand' | 'category'>(
 	reason: BootstrapSkipReason,
 	note: string,
 	skipDetail?: string,
-	referencingProductCount?: number
+	referencingProductCount?: number,
+	referencingProductCountPrimary?: number,
+	referencingProductCountSecondary?: number
 ): BootstrapUnitOutcome<Kind> {
-	return { kind, legacyId, legacyName, legacyParentId, action: 'skipped', skipReason: reason, skipDetail, note, referencingProductCount }
+	return {
+		kind,
+		legacyId,
+		legacyName,
+		legacyParentId,
+		action: 'skipped',
+		skipReason: reason,
+		skipDetail,
+		note,
+		referencingProductCount,
+		referencingProductCountPrimary,
+		referencingProductCountSecondary
+	}
 }
 
 /**
@@ -205,7 +253,7 @@ export async function bootstrapBrands(
 					'empty_title',
 					'Legacy brand has no title - never invented.',
 					undefined,
-					productReferenceCounts?.get(legacy.id)
+					checkedCount(productReferenceCounts, legacy.id)
 				)
 			)
 			continue
@@ -237,7 +285,7 @@ export async function bootstrapBrands(
 					'mapping_conflict',
 					`legacy_mysql/brand/${externalId} mapping conflict: ${mapping.reason}.`,
 					undefined,
-					productReferenceCounts?.get(legacy.id)
+					checkedCount(productReferenceCounts, legacy.id)
 				)
 			)
 			continue
@@ -270,7 +318,7 @@ export async function bootstrapBrands(
 			action,
 			internalId: mapping.mapping.internalId,
 			note: `${action} brand "${legacy.title}".`,
-			referencingProductCount: productReferenceCounts?.get(legacy.id)
+			referencingProductCount: checkedCount(productReferenceCounts, legacy.id)
 		})
 	}
 
@@ -314,15 +362,25 @@ function buildBrandSummary(units: BootstrapUnitOutcome<'brand'>[], mode: Bootstr
  */
 /**
  * `productReferenceCounts`: see bootstrapBrands' identical param - optional
- * legacy category_id -> count of legacy product rows referencing it
- * (Requirement 1). Built by the caller from dump.products/dump.productCategories;
- * this module never parses products itself.
+ * legacy category_id -> count of legacy product rows referencing it, from
+ * ANY source (primary category_id or secondary product_categories link),
+ * kept for backward compatibility with existing callers/tests. Built by the
+ * caller from dump.products/dump.productCategories; this module never
+ * parses products itself.
+ *
+ * `productReferenceCountsBySource` (Sprint 12B.3.2 Requirement 3): the same
+ * cross-reference, but split into `primary` (products.category_id pointing
+ * directly at this category) and `secondary` (product_categories junction
+ * rows) - reported as two distinct fields per unit instead of merged into
+ * one count, since a product can have a broken primary category_id while
+ * still carrying a valid secondary link.
  */
 export async function bootstrapCategories(
 	tx: Tx,
 	legacyCategories: LegacyCategory[],
 	mode: BootstrapMode,
-	productReferenceCounts?: Map<number, number>
+	productReferenceCounts?: Map<number, number>,
+	productReferenceCountsBySource?: { primary: Map<number, number>; secondary: Map<number, number> }
 ): Promise<CategoryBootstrapResult> {
 	const dryRun = mode === 'dry-run'
 	const units: BootstrapUnitOutcome<'category'>[] = []
@@ -343,7 +401,9 @@ export async function bootstrapCategories(
 	let deferredForUnresolvedParent = 0
 	let progressedThisPass = true
 
-	const refCount = (legacyId: number) => productReferenceCounts?.get(legacyId)
+	const refCount = (legacyId: number) => checkedCount(productReferenceCounts, legacyId)
+	const refCountPrimary = (legacyId: number) => checkedCount(productReferenceCountsBySource?.primary, legacyId)
+	const refCountSecondary = (legacyId: number) => checkedCount(productReferenceCountsBySource?.secondary, legacyId)
 
 	// Process roots and already-resolvable children in waves, until nothing
 	// more can progress - this correctly handles arbitrary tree depth
@@ -373,7 +433,9 @@ export async function bootstrapCategories(
 							'invalid_parent',
 							`parent_id ${legacy.parentId} does not reference any legacy category row in this dump.`,
 							`dangling reference: no category with id ${legacy.parentId} exists in the parsed dump`,
-							refCount(legacy.id)
+							refCount(legacy.id),
+							refCountPrimary(legacy.id),
+							refCountSecondary(legacy.id)
 						)
 					)
 					skippedReasons.set(legacy.id, 'invalid_parent')
@@ -396,7 +458,9 @@ export async function bootstrapCategories(
 						'empty_title',
 						'Legacy category has no titleRU - never invented.',
 						undefined,
-						refCount(legacy.id)
+						refCount(legacy.id),
+						refCountPrimary(legacy.id),
+						refCountSecondary(legacy.id)
 					)
 				)
 				skippedReasons.set(legacy.id, 'empty_title')
@@ -431,7 +495,9 @@ export async function bootstrapCategories(
 						'mapping_conflict',
 						`legacy_mysql/category/${externalId} mapping conflict: ${mapping.reason}.`,
 						undefined,
-						refCount(legacy.id)
+						refCount(legacy.id),
+						refCountPrimary(legacy.id),
+						refCountSecondary(legacy.id)
 					)
 				)
 				skippedReasons.set(legacy.id, 'mapping_conflict')
@@ -467,7 +533,9 @@ export async function bootstrapCategories(
 				action,
 				internalId: mapping.mapping.internalId,
 				note: `${action} category "${legacy.titleRu}"${isRoot ? ' (root)' : ` under parent ${legacy.parentId}`}.`,
-				referencingProductCount: refCount(legacy.id)
+				referencingProductCount: refCount(legacy.id),
+				referencingProductCountPrimary: refCountPrimary(legacy.id),
+				referencingProductCountSecondary: refCountSecondary(legacy.id)
 			})
 			remaining.delete(legacy.id)
 			progressedThisPass = true
@@ -503,7 +571,9 @@ export async function bootstrapCategories(
 				'parent_not_resolved',
 				`parent_id ${parentId} never resolved: ${detail}.`,
 				detail,
-				refCount(legacy.id)
+				refCount(legacy.id),
+				refCountPrimary(legacy.id),
+				refCountSecondary(legacy.id)
 			)
 		)
 	}

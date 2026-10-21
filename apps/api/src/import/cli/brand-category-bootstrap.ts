@@ -83,14 +83,42 @@ async function main() {
 	// and passed into the bootstrap as a read-only cross-reference, so a
 	// skipped brand/category's real-world impact is visible directly in the
 	// dry-run report instead of requiring a separate manual lookup.
+	//
+	// Sprint 12B.3.2 Requirement 3: categories get a PRIMARY (products.category_id)
+	// and SECONDARY (product_categories junction row) count, kept separate -
+	// a product can have a broken primary category_id while still carrying a
+	// valid secondary link (exactly Sprint 12A.2's "30/33 products" finding),
+	// so merging the two would hide that some products still genuinely
+	// depend on a category that looks unused by primary assignment alone.
+	// `productsByCategory` (combined) is still built too, for the existing
+	// single-count `referencingProductCount` field callers already rely on.
 	const productsByBrand = new Map<number, number>()
-	const productsByCategory = new Map<number, number>()
+	// Deduped by productId per category (not raw row counts) - Requirement 3
+	// asks for UNIQUE products, and a junction table can in principle carry
+	// more than one row for the same (product, category) pair.
+	const uniqueByCategoryPrimary = new Map<number, Set<number>>()
+	const uniqueByCategorySecondary = new Map<number, Set<number>>()
 	for (const product of dump.products) {
 		if (product.brandId !== null) productsByBrand.set(product.brandId, (productsByBrand.get(product.brandId) ?? 0) + 1)
-		if (product.categoryId !== null) productsByCategory.set(product.categoryId, (productsByCategory.get(product.categoryId) ?? 0) + 1)
+		if (product.categoryId !== null) {
+			if (!uniqueByCategoryPrimary.has(product.categoryId)) uniqueByCategoryPrimary.set(product.categoryId, new Set())
+			uniqueByCategoryPrimary.get(product.categoryId)!.add(product.id)
+		}
 	}
 	for (const link of dump.productCategories) {
-		productsByCategory.set(link.categoryId, (productsByCategory.get(link.categoryId) ?? 0) + 1)
+		if (!uniqueByCategorySecondary.has(link.categoryId)) uniqueByCategorySecondary.set(link.categoryId, new Set())
+		uniqueByCategorySecondary.get(link.categoryId)!.add(link.productId)
+	}
+	const productsByCategoryPrimary = new Map([...uniqueByCategoryPrimary].map(([catId, ids]) => [catId, ids.size]))
+	const productsByCategorySecondary = new Map([...uniqueByCategorySecondary].map(([catId, ids]) => [catId, ids.size]))
+	// Combined (backward-compatible single count): union of the two id sets
+	// per category, so a product counted in both primary and secondary for
+	// the same category is still only counted once.
+	const productsByCategory = new Map<number, number>()
+	const allCategoryIds = new Set([...uniqueByCategoryPrimary.keys(), ...uniqueByCategorySecondary.keys()])
+	for (const catId of allCategoryIds) {
+		const union = new Set<number>([...(uniqueByCategoryPrimary.get(catId) ?? []), ...(uniqueByCategorySecondary.get(catId) ?? [])])
+		productsByCategory.set(catId, union.size)
 	}
 
 	const mode = args.write ? 'write' : 'dry-run'
@@ -98,7 +126,10 @@ async function main() {
 
 	const result = await db.transaction(async tx => {
 		const brandResult = await bootstrapBrands(tx, dump.brands, mode, productsByBrand)
-		const categoryResult = await bootstrapCategories(tx, dump.categories, mode, productsByCategory)
+		const categoryResult = await bootstrapCategories(tx, dump.categories, mode, productsByCategory, {
+			primary: productsByCategoryPrimary,
+			secondary: productsByCategorySecondary
+		})
 		return { brandResult, categoryResult }
 	})
 
