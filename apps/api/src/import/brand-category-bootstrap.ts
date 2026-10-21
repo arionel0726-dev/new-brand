@@ -77,10 +77,18 @@ export type BootstrapSkipReason =
 export type BootstrapUnitOutcome<Kind extends 'brand' | 'category'> = {
 	kind: Kind
 	legacyId: number
+	/** Raw as read from the dump - "" (not omitted) when the title/titleRU column was empty, per Requirement 1: report the emptiness explicitly rather than hiding it. */
+	legacyName: string
+	/** Category only: the raw parent_id as read from the dump, including the 0 sentinel - never normalized away, so a human auditing a real run sees exactly what legacy stored. Always null for brands (brands have no parent concept). */
+	legacyParentId: number | null
 	action: 'created' | 'updated' | 'skipped'
 	skipReason?: BootstrapSkipReason
+	/** Requirement 2: precision beyond the reason code alone - e.g. which parent id a dangling reference pointed to, or whether a parent_not_resolved case is explained by its own parent having been skipped (and for what reason) vs. an apparent cycle. Populated only for skipped units. */
+	skipDetail?: string
 	internalId?: string
 	note: string
+	/** Requirement 1/5: how many legacy product rows reference this legacy brand_id/category_id, when the caller supplies a cross-reference map (see bootstrapBrands/bootstrapCategories' optional `productReferenceCounts` param). Undefined (not 0) when no cross-reference was supplied, so "0 known references" is never confused with "not checked". */
+	referencingProductCount?: number
 }
 
 export type BrandBootstrapSummary = {
@@ -112,10 +120,14 @@ function slugify(input: string): string {
 function skip<Kind extends 'brand' | 'category'>(
 	kind: Kind,
 	legacyId: number,
+	legacyName: string,
+	legacyParentId: number | null,
 	reason: BootstrapSkipReason,
-	note: string
+	note: string,
+	skipDetail?: string,
+	referencingProductCount?: number
 ): BootstrapUnitOutcome<Kind> {
-	return { kind, legacyId, action: 'skipped', skipReason: reason, note }
+	return { kind, legacyId, legacyName, legacyParentId, action: 'skipped', skipReason: reason, skipDetail, note, referencingProductCount }
 }
 
 /**
@@ -159,15 +171,43 @@ async function resolveUniqueSlug(
 	return { slug: suffixed, conflictWith: ledgerOwner ?? -1 }
 }
 
-export async function bootstrapBrands(tx: Tx, legacyBrands: LegacyBrand[], mode: BootstrapMode): Promise<BrandBootstrapResult> {
+/**
+ * `productReferenceCounts`: optional legacy brand_id -> count of legacy
+ * product rows referencing it (Requirement 1/5). The bootstrap module itself
+ * never parses products - this keeps it decoupled from
+ * parsers/mysql-catalog.ts's product extraction, exactly as before; the CLI
+ * (which already calls loadLegacyCatalogDump and therefore already has
+ * dump.products in memory for free) builds this map and passes it in.
+ * Omitting it entirely (undefined) is a legitimate, honest "not checked" -
+ * never defaulted to an empty map that would silently read as "0 references
+ * confirmed" when no check actually ran.
+ */
+export async function bootstrapBrands(
+	tx: Tx,
+	legacyBrands: LegacyBrand[],
+	mode: BootstrapMode,
+	productReferenceCounts?: Map<number, number>
+): Promise<BrandBootstrapResult> {
 	const dryRun = mode === 'dry-run'
 	const units: BootstrapUnitOutcome<'brand'>[] = []
 	const slugLedger: SlugLedger = new Map()
 	const conflicts: BrandBootstrapSummary['conflicts'] = []
 
 	for (const legacy of legacyBrands) {
+		const legacyName = legacy.title ?? ''
 		if (legacy.title === null || legacy.title.trim().length === 0) {
-			units.push(skip('brand', legacy.id, 'empty_title', 'Legacy brand has no title - never invented.'))
+			units.push(
+				skip(
+					'brand',
+					legacy.id,
+					legacyName,
+					null,
+					'empty_title',
+					'Legacy brand has no title - never invented.',
+					undefined,
+					productReferenceCounts?.get(legacy.id)
+				)
+			)
 			continue
 		}
 
@@ -188,7 +228,18 @@ export async function bootstrapBrands(tx: Tx, legacyBrands: LegacyBrand[], mode:
 
 		const mapping = await resolveIdentity(tx, mode, { entityType: 'brand', externalId, internalId: candidateId })
 		if (mapping.outcome === 'conflict') {
-			units.push(skip('brand', legacy.id, 'mapping_conflict', `legacy_mysql/brand/${externalId} mapping conflict: ${mapping.reason}.`))
+			units.push(
+				skip(
+					'brand',
+					legacy.id,
+					legacyName,
+					null,
+					'mapping_conflict',
+					`legacy_mysql/brand/${externalId} mapping conflict: ${mapping.reason}.`,
+					undefined,
+					productReferenceCounts?.get(legacy.id)
+				)
+			)
 			continue
 		}
 
@@ -211,7 +262,16 @@ export async function bootstrapBrands(tx: Tx, legacyBrands: LegacyBrand[], mode:
 				await tx.update(brands).set({ ...fields, updatedAt: new Date() }).where(eq(brands.id, mapping.mapping.internalId))
 			}
 		}
-		units.push({ kind: 'brand', legacyId: legacy.id, action, internalId: mapping.mapping.internalId, note: `${action} brand "${legacy.title}".` })
+		units.push({
+			kind: 'brand',
+			legacyId: legacy.id,
+			legacyName,
+			legacyParentId: null,
+			action,
+			internalId: mapping.mapping.internalId,
+			note: `${action} brand "${legacy.title}".`,
+			referencingProductCount: productReferenceCounts?.get(legacy.id)
+		})
 	}
 
 	return { summary: buildBrandSummary(units, mode, conflicts), units }
@@ -252,7 +312,18 @@ function buildBrandSummary(units: BootstrapUnitOutcome<'brand'>[], mode: Bootstr
  * `categories` table IS a genuine broken reference and is reported via
  * `invalid_parent`, never silently rooted.
  */
-export async function bootstrapCategories(tx: Tx, legacyCategories: LegacyCategory[], mode: BootstrapMode): Promise<CategoryBootstrapResult> {
+/**
+ * `productReferenceCounts`: see bootstrapBrands' identical param - optional
+ * legacy category_id -> count of legacy product rows referencing it
+ * (Requirement 1). Built by the caller from dump.products/dump.productCategories;
+ * this module never parses products itself.
+ */
+export async function bootstrapCategories(
+	tx: Tx,
+	legacyCategories: LegacyCategory[],
+	mode: BootstrapMode,
+	productReferenceCounts?: Map<number, number>
+): Promise<CategoryBootstrapResult> {
 	const dryRun = mode === 'dry-run'
 	const units: BootstrapUnitOutcome<'category'>[] = []
 	const slugLedger: SlugLedger = new Map()
@@ -263,9 +334,16 @@ export async function bootstrapCategories(tx: Tx, legacyCategories: LegacyCatego
 	// written/resolved, so children processed later in the same pass can
 	// find their already-handled parent.
 	const resolvedInternalIds = new Map<number, string>()
+	// legacyId -> its own skip reason, populated alongside resolvedInternalIds
+	// (Requirement 2): lets the final parent_not_resolved sweep explain WHY a
+	// child's parent never resolved - "your parent was itself skipped for X" -
+	// rather than a generic "cycle or upstream failure" guess.
+	const skippedReasons = new Map<number, BootstrapSkipReason>()
 	const remaining = new Map(legacyCategories.map(c => [c.id, c]))
 	let deferredForUnresolvedParent = 0
 	let progressedThisPass = true
+
+	const refCount = (legacyId: number) => productReferenceCounts?.get(legacyId)
 
 	// Process roots and already-resolvable children in waves, until nothing
 	// more can progress - this correctly handles arbitrary tree depth
@@ -273,12 +351,32 @@ export async function bootstrapCategories(tx: Tx, legacyCategories: LegacyCatego
 	while (remaining.size > 0 && progressedThisPass) {
 		progressedThisPass = false
 		for (const legacy of [...remaining.values()].sort((a, b) => a.id - b.id)) {
+			const legacyName = legacy.titleRu ?? ''
+			// Requirement 3: `parent_id = 0` (the legacy table's own
+			// `NOT NULL DEFAULT 0`, confirmed against the real CREATE TABLE in
+			// docs/legacy-reference/vizaje_nica_local.sql) is already, and
+			// correctly, treated as "this is a root, no parent expected" here -
+			// re-verified this sprint, not a bug. A nonzero parent_id that
+			// doesn't match any real category id is the genuine data-quality
+			// problem (`invalid_parent`, below).
 			const isRoot = legacy.parentId === null || legacy.parentId === 0
 			let parentInternalId: string | null = null
 
 			if (!isRoot) {
 				if (!legacyIds.has(legacy.parentId as number)) {
-					units.push(skip('category', legacy.id, 'invalid_parent', `parent_id ${legacy.parentId} does not reference any legacy category row.`))
+					units.push(
+						skip(
+							'category',
+							legacy.id,
+							legacyName,
+							legacy.parentId,
+							'invalid_parent',
+							`parent_id ${legacy.parentId} does not reference any legacy category row in this dump.`,
+							`dangling reference: no category with id ${legacy.parentId} exists in the parsed dump`,
+							refCount(legacy.id)
+						)
+					)
+					skippedReasons.set(legacy.id, 'invalid_parent')
 					remaining.delete(legacy.id)
 					progressedThisPass = true
 					continue
@@ -289,7 +387,19 @@ export async function bootstrapCategories(tx: Tx, legacyCategories: LegacyCatego
 			}
 
 			if (legacy.titleRu === null || legacy.titleRu.trim().length === 0) {
-				units.push(skip('category', legacy.id, 'empty_title', 'Legacy category has no titleRU - never invented.'))
+				units.push(
+					skip(
+						'category',
+						legacy.id,
+						legacyName,
+						legacy.parentId,
+						'empty_title',
+						'Legacy category has no titleRU - never invented.',
+						undefined,
+						refCount(legacy.id)
+					)
+				)
+				skippedReasons.set(legacy.id, 'empty_title')
 				remaining.delete(legacy.id)
 				progressedThisPass = true
 				continue
@@ -312,7 +422,19 @@ export async function bootstrapCategories(tx: Tx, legacyCategories: LegacyCatego
 
 			const mapping = await resolveIdentity(tx, mode, { entityType: 'category', externalId, internalId: candidateId })
 			if (mapping.outcome === 'conflict') {
-				units.push(skip('category', legacy.id, 'mapping_conflict', `legacy_mysql/category/${externalId} mapping conflict: ${mapping.reason}.`))
+				units.push(
+					skip(
+						'category',
+						legacy.id,
+						legacyName,
+						legacy.parentId,
+						'mapping_conflict',
+						`legacy_mysql/category/${externalId} mapping conflict: ${mapping.reason}.`,
+						undefined,
+						refCount(legacy.id)
+					)
+				)
+				skippedReasons.set(legacy.id, 'mapping_conflict')
 				remaining.delete(legacy.id)
 				progressedThisPass = true
 				continue
@@ -340,9 +462,12 @@ export async function bootstrapCategories(tx: Tx, legacyCategories: LegacyCatego
 			units.push({
 				kind: 'category',
 				legacyId: legacy.id,
+				legacyName,
+				legacyParentId: legacy.parentId,
 				action,
 				internalId: mapping.mapping.internalId,
-				note: `${action} category "${legacy.titleRu}"${isRoot ? ' (root)' : ` under parent ${legacy.parentId}`}.`
+				note: `${action} category "${legacy.titleRu}"${isRoot ? ' (root)' : ` under parent ${legacy.parentId}`}.`,
+				referencingProductCount: refCount(legacy.id)
 			})
 			remaining.delete(legacy.id)
 			progressedThisPass = true
@@ -350,11 +475,37 @@ export async function bootstrapCategories(tx: Tx, legacyCategories: LegacyCatego
 	}
 
 	// Whatever is left after the loop stabilizes has a parent chain that
-	// never resolved (a cycle, or a parent whose own processing failed for
-	// another reason) - reported explicitly, never force-rooted.
+	// never resolved. Requirement 2: distinguish WHY, don't lump every case
+	// under one vague note -
+	//   - the direct parent is itself a skipped unit: name that parent's own
+	//     reason (a child of an invalid_parent/empty_title/mapping_conflict
+	//     category inherits "not resolvable" without being a cycle itself);
+	//   - the direct parent is ALSO still stuck in `remaining`: this is the
+	//     genuine cycle/chain case (A waits on B, B waits on A, or a longer
+	//     loop) - reported as such, never force-rooted.
 	for (const legacy of remaining.values()) {
 		deferredForUnresolvedParent++
-		units.push(skip('category', legacy.id, 'parent_not_resolved', `parent_id ${legacy.parentId} never resolved (cycle or upstream failure).`))
+		const parentId = legacy.parentId
+		let detail: string
+		if (parentId !== null && skippedReasons.has(parentId)) {
+			detail = `parent category ${parentId} was itself skipped (${skippedReasons.get(parentId)}) - unresolvable because its own ancestor is missing, no circular reference involved`
+		} else if (parentId !== null && remaining.has(parentId)) {
+			detail = `parent category ${parentId} never resolved either - consistent with a resolution cycle, not a single dangling reference`
+		} else {
+			detail = `parent_id ${parentId} did not resolve for an undetermined reason`
+		}
+		units.push(
+			skip(
+				'category',
+				legacy.id,
+				legacy.titleRu ?? '',
+				parentId,
+				'parent_not_resolved',
+				`parent_id ${parentId} never resolved: ${detail}.`,
+				detail,
+				refCount(legacy.id)
+			)
+		)
 	}
 
 	const baseSummary = buildCategorySummary(units, mode, conflicts)

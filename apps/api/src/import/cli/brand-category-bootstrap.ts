@@ -61,16 +61,32 @@ async function main() {
 	}
 	const sql = await sqlFile.text()
 
-	console.log('Loading legacy MySQL catalog dump (brands + categories only)...')
+	console.log('Loading legacy MySQL catalog dump (brands + categories + products for reference counts)...')
 	const dump = loadLegacyCatalogDump(sql)
-	console.log(`  ${dump.brands.length} brands, ${dump.categories.length} categories parsed from SQL.`)
+	console.log(`  ${dump.brands.length} brands, ${dump.categories.length} categories, ${dump.products.length} products parsed from SQL.`)
+
+	// Requirement 1/5: how many legacy product rows reference each legacy
+	// brand_id/category_id - computed once here from the already-parsed dump
+	// (loadLegacyCatalogDump already loads products, no extra parsing cost)
+	// and passed into the bootstrap as a read-only cross-reference, so a
+	// skipped brand/category's real-world impact is visible directly in the
+	// dry-run report instead of requiring a separate manual lookup.
+	const productsByBrand = new Map<number, number>()
+	const productsByCategory = new Map<number, number>()
+	for (const product of dump.products) {
+		if (product.brandId !== null) productsByBrand.set(product.brandId, (productsByBrand.get(product.brandId) ?? 0) + 1)
+		if (product.categoryId !== null) productsByCategory.set(product.categoryId, (productsByCategory.get(product.categoryId) ?? 0) + 1)
+	}
+	for (const link of dump.productCategories) {
+		productsByCategory.set(link.categoryId, (productsByCategory.get(link.categoryId) ?? 0) + 1)
+	}
 
 	const mode = args.write ? 'write' : 'dry-run'
 	console.log(`\nRunning brand/category bootstrap in ${mode.toUpperCase()} mode...`)
 
 	const result = await db.transaction(async tx => {
-		const brandResult = await bootstrapBrands(tx, dump.brands, mode)
-		const categoryResult = await bootstrapCategories(tx, dump.categories, mode)
+		const brandResult = await bootstrapBrands(tx, dump.brands, mode, productsByBrand)
+		const categoryResult = await bootstrapCategories(tx, dump.categories, mode, productsByCategory)
 		return { brandResult, categoryResult }
 	})
 

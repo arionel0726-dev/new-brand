@@ -375,6 +375,93 @@ describe('Requirement 14/15: draft-to-publishable methodology (not a fabricated 
 	})
 })
 
+describe('Sprint 12B.3.1 Requirement 1: enriched per-skip diagnostic fields', () => {
+	test('a skipped brand carries its legacy name (or explicit empty string), legacyParentId=null, and the supplied product-reference count', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapBrands(tx, [makeBrand({ id: 50, title: '' })], 'write', new Map([[50, 7]]))
+		)
+		const unit = result.units[0]
+		expect(unit.action).toBe('skipped')
+		expect(unit.legacyName).toBe('')
+		expect(unit.legacyParentId).toBeNull()
+		expect(unit.referencingProductCount).toBe(7)
+		expect(unit.skipReason).toBe('empty_title')
+	})
+
+	test('referencingProductCount is undefined (not 0) when the caller supplies no cross-reference map - "not checked" is never confused with "zero references"', async () => {
+		const result = await db.transaction(tx => bootstrapBrands(tx, [makeBrand({ id: 51, title: '' })], 'write'))
+		expect(result.units[0].referencingProductCount).toBeUndefined()
+	})
+
+	test('a skipped category carries its legacyParentId exactly as read from the dump (including the raw invalid value) and a product-reference count', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapCategories(tx, [makeCategory({ id: 60, parentId: 999 })], 'write', new Map([[60, 3]]))
+		)
+		const unit = result.units[0]
+		expect(unit.skipReason).toBe('invalid_parent')
+		expect(unit.legacyParentId).toBe(999)
+		expect(unit.referencingProductCount).toBe(3)
+		expect(unit.skipDetail).toContain('999')
+	})
+})
+
+describe('Sprint 12B.3.1 Requirement 3: root-category sentinel re-verified, not a bug', () => {
+	test('parent_id=0 and parent_id=null both resolve as root - re-confirms the existing behavior is already correct, not a newly-discovered fix', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapCategories(tx, [makeCategory({ id: 1, parentId: 0, titleRu: 'RootZero' }), makeCategory({ id: 2, parentId: null, titleRu: 'RootNull' })], 'write')
+		)
+		expect(result.summary.skipped).toBe(0)
+		const rows = await db.select().from(categories)
+		expect(rows.every(r => r.parentId === null)).toBe(true)
+	})
+})
+
+describe('Sprint 12B.3.1 Requirement 2: parent_not_resolved explains WHY, not a generic "cycle or upstream failure"', () => {
+	test('a child of an already-invalid_parent category is reported with its ancestor\'s reason, distinct from a genuine cycle', async () => {
+		// Category 2's parent (1) has an invalid_parent itself (points at nonexistent 999),
+		// so 2 can never resolve - but this is NOT a cycle, it's a cascading unresolvable ancestor.
+		const legacy = [makeCategory({ id: 1, parentId: 999, titleRu: 'BrokenParent' }), makeCategory({ id: 2, parentId: 1, titleRu: 'Child' })]
+		const result = await db.transaction(tx => bootstrapCategories(tx, legacy, 'write'))
+		expect(result.summary.bySkipReason.invalid_parent).toBe(1)
+		expect(result.summary.bySkipReason.parent_not_resolved).toBe(1)
+		const child = result.units.find(u => u.legacyId === 2)!
+		expect(child.skipReason).toBe('parent_not_resolved')
+		expect(child.skipDetail).toContain('itself skipped')
+		expect(child.skipDetail).toContain('invalid_parent')
+		expect(child.skipDetail).not.toContain('cycle')
+	})
+
+	test('a genuine two-node cycle (A parents B, B parents A) is reported as a cycle, not conflated with an invalid-parent cascade', async () => {
+		const legacy = [makeCategory({ id: 1, parentId: 2, titleRu: 'A' }), makeCategory({ id: 2, parentId: 1, titleRu: 'B' })]
+		const result = await db.transaction(tx => bootstrapCategories(tx, legacy, 'write'))
+		expect(result.summary.created).toBe(0)
+		expect(result.summary.bySkipReason.parent_not_resolved).toBe(2)
+		expect(result.summary.deferredForUnresolvedParent).toBe(2)
+		for (const u of result.units) {
+			expect(u.skipDetail).toContain('cycle')
+		}
+	})
+})
+
+describe('Sprint 12B.3.1 Requirement 7 re-check: catalog-importer.ts composes with the enriched bootstrap unchanged', () => {
+	test('the existing Requirement 13 reconciliation test shape still passes with the new bootstrap signature (extra optional param does not break composition)', async () => {
+		const legacyProduct = makeLegacyProduct({ id: 400, guid: '400', titleRu: 'Toner', brandId: 15, categoryId: null, uriRu: null })
+		const dump = makeDump({ products: [legacyProduct], brands: [makeBrand({ id: 15, title: 'Vichy' })] })
+		await db.transaction(tx => bootstrapBrands(tx, dump.brands, 'write'))
+		const oneCRaw = [{ ID_nom: '400', Brand: 'Vichy', Sex: 'Женский' }]
+		const oneCRecords = parseProductsFeed(oneCRaw).validRecords
+		const input: CatalogImportInput = {
+			dump,
+			oneCRecords,
+			families: reconcileFamilies(dump, oneCRecords),
+			positions: reconcileSqlWith1c(dump, oneCRecords),
+			idNomDuplicates: classifyIdNomDuplicates(oneCRaw, 'ID_nom')
+		}
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		expect(result.units[0].unpublishedForMissingBrand).toBe(false)
+	})
+})
+
 describe('Important-A: quarantinedPositionsTotal vs bySkipReason.quarantine (12B.2.1 fix should keep them equal)', () => {
 	test('for a synthetic set with quarantined positions, the two counters agree - a future mismatch is itself a regression signal, not expected noise', async () => {
 		const quarantined = makeLegacyProduct({ id: 300, titleRu: 'Quarantined item' })
