@@ -44,7 +44,7 @@ export default async function LocaleLayout({ children, params }: LayoutProps<'/[
 
 	return (
 		<html lang={localeToBcp47[locale]} className={cn('h-full antialiased', geistSans.variable, geistMono.variable, 'font-sans')}>
-			<body className="flex min-h-full flex-col bg-white text-ink">
+			<body className="flex min-h-full flex-col bg-white pb-[calc(76px+env(safe-area-inset-bottom))] text-ink md:pb-0">
 				<a
 					href="#main-content"
 					className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:text-white"

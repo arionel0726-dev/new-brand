@@ -260,7 +260,7 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 				</div>
 			</section>
 
-			<div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-white/95 p-3 backdrop-blur lg:hidden">
+			<div className="fixed inset-x-0 bottom-[calc(76px+env(safe-area-inset-bottom))] z-40 border-t border-border bg-white/95 p-3 backdrop-blur md:hidden">
 				<div className="mx-auto flex max-w-lg items-center gap-3">
 					<div className="min-w-0 flex-1">
 						<p className="truncate text-xs text-ink-muted">{name}</p>
