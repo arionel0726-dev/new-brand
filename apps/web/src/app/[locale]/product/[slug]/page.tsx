@@ -1,11 +1,12 @@
-import Image from 'next/image'
 import Link from 'next/link'
 import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 import { isLocale, locales } from '@/i18n/config'
 import { getDictionary } from '@/i18n/get-dictionary'
-import { getProductBySlug, findBrandById, getCatalogProducts } from '@/lib/catalog/data'
-import { AddToCart } from '@/components/product/add-to-cart'
+import { getProductBySlug, findBrandById, getBrands, getCatalogProducts } from '@/lib/catalog/data'
+import { ProductDetail } from '@/components/product/product-detail'
+import { ProductGrid } from '@/components/product/product-grid'
+import { getProductEditorialCopy } from '@/data/mock/product-details'
 
 export async function generateStaticParams() {
 	const { products } = await getCatalogProducts({ pageSize: 1000 })
@@ -33,13 +34,20 @@ export default async function ProductDetailPage({ params }: PageProps<'/[locale]
 	const { locale, slug } = await params
 	if (!isLocale(locale)) notFound()
 
-	const [dict, product] = await Promise.all([getDictionary(locale), getProductBySlug(locale, slug)])
+	const [dict, product, brands, relatedResult] = await Promise.all([
+		getDictionary(locale),
+		getProductBySlug(locale, slug),
+		getBrands(),
+		getCatalogProducts({ pageSize: 100 })
+	])
 	if (!product) notFound()
 
 	const brand = findBrandById(product.brandId)
 	const name = product.name[locale] ?? product.name.ru
 	const description = product.description[locale] ?? product.description.ru
 	const lowestVariant = product.variants.reduce((min, v) => (v.priceBani < min.priceBani ? v : min), product.variants[0])
+	const relatedProducts = relatedResult.products.filter(item => item.id !== product.id && item.categoryGroup === product.categoryGroup).slice(0, 4)
+	const brandsById = new Map(brands.map(item => [item.id, item]))
 
 	const jsonLd = {
 		'@context': 'https://schema.org',
@@ -82,33 +90,30 @@ export default async function ProductDetailPage({ params }: PageProps<'/[locale]
 				<span className="text-ink">{name}</span>
 			</nav>
 
-			<div className="mt-3 lg:grid lg:grid-cols-2 lg:gap-10 lg:px-6">
-				<div className="flex snap-x snap-mandatory gap-0 overflow-x-auto lg:grid lg:grid-cols-2 lg:gap-2 lg:overflow-visible">
-					{product.images.map((src, i) => (
-						<div key={src} className="relative aspect-[4/5] w-full shrink-0 snap-center bg-surface-soft">
-							<Image src={src} alt={i === 0 ? name : ''} fill sizes="(min-width: 1024px) 45vw, 100vw" priority={i === 0} className="object-cover" />
+			<div className="mt-6 lg:mt-8">
+				<ProductDetail
+					product={product}
+					brand={brand}
+					locale={locale}
+					dict={dict}
+					editorial={getProductEditorialCopy(locale, product.categoryGroup)}
+				/>
+			</div>
+
+			{relatedProducts.length > 0 && (
+				<section className="mx-auto mt-20 max-w-[1440px] border-t border-border px-4 pt-12 sm:px-6 lg:mt-28 lg:px-10 xl:px-16">
+					<div className="mb-7 flex items-end justify-between gap-4">
+						<div>
+							<p className="text-[11px] font-medium uppercase tracking-[0.2em] text-brand-accent">{dict.brand.name}</p>
+							<h2 className="mt-3 text-2xl font-medium tracking-tight text-ink sm:text-3xl">{dict.product.recommended}</h2>
 						</div>
-					))}
-				</div>
-
-				<div className="px-4 pt-5 sm:px-6 lg:px-0 lg:pt-0">
-					{brand && (
-						<Link href={`/${locale}/brands/${brand.slug}`} className="text-xs uppercase tracking-wide text-ink-muted">
-							{brand.name}
+						<Link href={`/${locale}/catalog?category=${product.categoryGroup}`} className="hidden text-xs font-medium uppercase tracking-[0.14em] text-ink underline decoration-border underline-offset-4 transition-colors hover:text-brand-accent sm:block">
+							{dict.product.viewCatalog}
 						</Link>
-					)}
-					<h1 className="mt-1 text-xl font-medium text-ink">{name}</h1>
-
-					<div className="mt-5">
-						<AddToCart product={product} locale={locale} dict={dict} />
 					</div>
-				</div>
-			</div>
-
-			<div className="mt-10 border-t border-border px-4 pt-8 sm:px-6 lg:px-6">
-				<h2 className="text-sm font-medium uppercase tracking-wide text-ink-muted">{dict.product.details}</h2>
-				<p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink">{description}</p>
-			</div>
+					<ProductGrid products={relatedProducts} brandsById={brandsById} locale={locale} dict={dict} />
+				</section>
+			)}
 		</div>
 	)
 }
