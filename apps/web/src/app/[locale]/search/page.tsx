@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation'
-import { Search as SearchIcon } from 'lucide-react'
+import Link from 'next/link'
+import { ScanLine, Search as SearchIcon } from 'lucide-react'
 import { isLocale } from '@/i18n/config'
 
 // Reads searchParams (q) - request-time, see catalog/page.tsx.
@@ -23,17 +24,21 @@ export default async function SearchPage({ params, searchParams }: PageProps<'/[
 	const brandsById = new Map(brands.map(b => [b.id, b]))
 
 	return (
-		<div className="px-4 py-6 sm:px-6">
-			<form method="get" role="search" className="relative">
-				<SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-ink-muted" aria-hidden />
+		<div className="mx-auto max-w-3xl px-4 pb-12 pt-2 sm:px-6">
+			<h1 className="sr-only">{dict.search.title}</h1>
+			<form method="get" role="search" className="flex items-center gap-3 border-b border-border py-3">
+				<SearchIcon className="size-8 shrink-0 stroke-[1.5] text-ink" aria-hidden />
 				<input
 					type="search"
 					name="q"
 					defaultValue={query}
 					placeholder={dict.search.placeholder}
 					autoFocus
-					className="w-full rounded-md border border-border py-3 pl-10 pr-3.5 text-sm text-ink"
+					className="min-w-0 flex-1 bg-transparent text-2xl font-medium tracking-tight text-ink outline-none placeholder:text-[#D7D7D7] sm:text-3xl"
 				/>
+				<Link href={`/${locale}/categories`} aria-label={dict.search.openCategories} className="flex size-11 shrink-0 items-center justify-center text-ink transition-colors hover:text-brand-accent">
+					<ScanLine className="size-7 stroke-[1.6]" aria-hidden />
+				</Link>
 			</form>
 
 			{query ? (
@@ -44,7 +49,23 @@ export default async function SearchPage({ params, searchParams }: PageProps<'/[
 					</div>
 				</>
 			) : (
-				<p className="py-16 text-center text-sm text-ink-muted">{dict.search.empty}</p>
+				<section className="pt-10" aria-label={dict.search.popular}>
+					<p className="text-xs font-medium uppercase tracking-[0.18em] text-ink-muted">{dict.search.popular}</p>
+					<div className="mt-5 divide-y divide-border border-y border-border">
+						<Link href={`/${locale}/categories`} className="flex min-h-16 items-center justify-between text-xl text-ink">
+							{dict.nav.catalog}
+							<span aria-hidden>→</span>
+						</Link>
+						<Link href={`/${locale}/brands`} className="flex min-h-16 items-center justify-between text-xl text-ink">
+							{dict.nav.brands}
+							<span aria-hidden>→</span>
+						</Link>
+						<Link href={`/${locale}/catalog?sort=newest`} className="flex min-h-16 items-center justify-between text-xl text-ink">
+							{dict.home.newArrivals}
+							<span aria-hidden>→</span>
+						</Link>
+					</div>
+				</section>
 			)}
 		</div>
 	)

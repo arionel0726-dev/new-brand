@@ -1,10 +1,11 @@
 import Link from 'next/link'
+import { Suspense } from 'react'
 import { Menu, Search, ShoppingBag, Heart } from 'lucide-react'
 import type { Dictionary } from '@/i18n/get-dictionary'
 import type { Locale } from '@/i18n/config'
 import { translate } from '@/i18n/get-dictionary'
 import { NavDrawer } from './nav-drawer'
-import { MobileBottomNav } from './mobile-bottom-nav'
+import { MobileBottomNav, MobileBottomNavFallback } from './mobile-bottom-nav'
 import { freeDeliveryThresholdBani } from '@/data/mock/home'
 import { formatMoney } from '@/lib/catalog/money'
 
@@ -78,7 +79,9 @@ export function Header({ locale, dict }: HeaderProps) {
 					</div>
 				</div>
 			</header>
-			<MobileBottomNav locale={locale} dict={dict} />
+			<Suspense fallback={<MobileBottomNavFallback locale={locale} dict={dict} />}>
+				<MobileBottomNav locale={locale} dict={dict} />
+			</Suspense>
 		</>
 	)
 }

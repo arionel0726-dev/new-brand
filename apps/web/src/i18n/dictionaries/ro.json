@@ -110,10 +110,37 @@
 	},
 	"search": {
 		"title": "Căutare",
-		"placeholder": "Caută produse, branduri, categorii",
+		"placeholder": "Caută produse și branduri",
+		"openCategories": "Deschide categoriile",
+		"popular": "Populare",
 		"empty": "Nu am găsit rezultate",
 		"resultsCount": "{count} rezultate",
 		"recent": "Căutări recente"
+	},
+	"cartPage": {
+		"title": "Coș",
+		"emptyTitle": "Coșul este gol",
+		"emptyText": "Produsele adăugate vor apărea aici. Acum coșul funcționează în mod demonstrativ.",
+		"cta": "Vezi catalogul"
+	},
+	"wishlistPage": {
+		"title": "Favorite",
+		"emptyTitle": "Nu ai produse favorite",
+		"emptyText": "Salvează produsele care îți plac pentru a reveni la ele mai târziu.",
+		"cta": "Vezi catalogul"
+	},
+	"accountPage": {
+		"title": "Cont",
+		"emptyTitle": "Contul este în pregătire",
+		"emptyText": "Autentificarea și istoricul comenzilor vor fi conectate într-un scenariu backend separat.",
+		"cta": "Vezi catalogul"
+	},
+	"supportPage": {
+		"faq": "FAQ / Întrebări frecvente",
+		"placeholder": "Conținutul acestei secțiuni va fi adăugat după confirmarea condițiilor operaționale VIZAJE-NICA."
+	},
+	"legalPage": {
+		"placeholder": "Textul juridic va fi adăugat după confirmarea condițiilor finale ale proiectului."
 	},
 	"mobileCategories": {
 		"title": "Categorii",

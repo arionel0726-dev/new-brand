@@ -14,7 +14,7 @@ type MobileBottomNavProps = {
 }
 
 type NavItem = {
-	key: 'search' | 'wishlist' | 'home' | 'account' | 'categories'
+	key: 'search' | 'wishlist' | 'home' | 'account' | 'cart'
 	href: string
 	label: string
 	icon?: LucideIcon
@@ -22,12 +22,20 @@ type NavItem = {
 
 export function MobileBottomNav({ locale, dict }: MobileBottomNavProps) {
 	const pathname = usePathname() ?? ''
+	return <MobileBottomNavContent locale={locale} dict={dict} pathname={pathname} />
+}
+
+export function MobileBottomNavFallback({ locale, dict }: MobileBottomNavProps) {
+	return <MobileBottomNavContent locale={locale} dict={dict} pathname="" />
+}
+
+function MobileBottomNavContent({ locale, dict, pathname }: MobileBottomNavProps & { pathname: string }) {
 	const items: NavItem[] = [
 		{ key: 'search', href: `/${locale}/search`, label: dict.nav.search, icon: Search },
 		{ key: 'wishlist', href: `/${locale}/wishlist`, label: dict.nav.wishlist, icon: Heart },
 		{ key: 'home', href: `/${locale}`, label: dict.brand.name },
 		{ key: 'account', href: `/${locale}/account`, label: dict.nav.account, icon: UserCircle },
-		{ key: 'categories', href: `/${locale}/categories`, label: dict.nav.categories, icon: ShoppingBag }
+		{ key: 'cart', href: `/${locale}/cart`, label: dict.nav.cart, icon: ShoppingBag }
 	]
 
 	return (
