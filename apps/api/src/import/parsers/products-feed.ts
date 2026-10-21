@@ -43,7 +43,21 @@ export const productsFeedRecordSchema = z
 		Sex: optionalTextSchema,
 		QuantityBalance: z.number().nullish(),
 		Price: priceBaniSchema,
-		PriceWH: priceBaniSchema
+		PriceWH: priceBaniSchema,
+		// Sprint 12B.2: typed (previously only reachable via .passthrough())
+		// because the catalog importer now reads these as the content source
+		// for products.short_description_ru/ro, ingredients_ru/ro and
+		// instructions_ru/ro (Sprint 12B.1's new columns) - see
+		// docs/vizaje-identity-architecture.md's field-correspondence matrix.
+		// Still fully optional: a confirmed-matched product with none of
+		// these populated simply imports with those columns left null, never
+		// fabricated.
+		ShortDescriptionRus: optionalTextSchema,
+		ShortDescriptionMD: optionalTextSchema,
+		InstructionRU: optionalTextSchema,
+		InstructionMD: optionalTextSchema,
+		componentsRu: optionalTextSchema,
+		componentsMD: optionalTextSchema
 	})
 	.passthrough()
 
