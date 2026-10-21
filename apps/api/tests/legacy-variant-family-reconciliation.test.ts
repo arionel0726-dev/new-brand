@@ -473,3 +473,82 @@ describe('catalog-importer: legacy_variant_family write path (Sprint 12B.5 Pass 
 		expect(shared[0].url).toBe('shared.jpg')
 	})
 })
+
+describe('Sprint 12B.5 verification follow-up: cross-pass 1C ID_nom collision safety (Question 3)', () => {
+	beforeEach(async () => {
+		await resetDatabase()
+	})
+
+	/**
+	 * Question 3 (the directive's "most safety-critical" question): can a
+	 * single 1C ID_nom ever be assigned to two different V2 ProductVariants
+	 * across Pass 0/1/2? The existing exclusion test above ("a legacy product
+	 * reconstructed by Pass 0 is never also processed by Pass 1 or Pass 2")
+	 * only proves SAME-legacy-product exclusion (via legacyVariantFamilyClaimedIds,
+	 * keyed on legacy products.id). It does NOT cover two DIFFERENT legacy
+	 * products whose own, independent matching both resolve to the SAME
+	 * ID_nom - a scenario Sprint 12A.2 found plausible in real legacy data
+	 * (duplicate GUIDs across unrelated rows).
+	 *
+	 * Fixture: legacy product 900 has 2 products_variable rows, confirmed by
+	 * Pass 0 (reconcileLegacyVariantFamilies) against ID_nom '900101' and
+	 * '900102'. A completely separate, standalone legacy product 901 (no
+	 * products_variable rows of its own) has `guid: '900101'` - the exact
+	 * ID_nom Pass 0 already confirmed for product 900's first variant. Since
+	 * reconcileSqlWith1c's GUID index has no knowledge of Pass 0's claims, it
+	 * independently reports product 901 as a confirmed guid_id_nom match on
+	 * the same ID_nom too.
+	 */
+	test('two different legacy products independently matching the same 1C ID_nom never produce two product_variants rows for it', async () => {
+		const familyParent = makeLegacyProduct({ id: 900, titleRu: 'Collision Family' })
+		const variables = [
+			makeVariable({ id: 20001, productId: 900, sku: '900101' }),
+			makeVariable({ id: 20002, productId: 900, sku: '900102' })
+		]
+		const standalone = makeLegacyProduct({ id: 901, titleRu: 'Collider', guid: '900101' })
+		const dump = makeDump({ products: [familyParent, standalone], productVariables: variables })
+		const oneCRaw = [makeOneCRaw({ ID_nom: '900101' }), makeOneCRaw({ ID_nom: '900102' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		// Confirm the premise: Pass 0 confirms the family from 900's own variable rows,
+		// and reconcileSqlWith1c (feeding Pass 2) independently also reports 901 as a
+		// confirmed guid_id_nom match on the same ID_nom '900101' - i.e. both passes'
+		// OWN reconciliation output really does claim the same ID_nom before any
+		// cross-pass write-time guard runs.
+		const legacyFamilies = reconcileLegacyVariantFamilies(dump, input.oneCRecords)
+		expect(legacyFamilies.families.find(f => f.legacyProductId === 900)?.classification).toBe('confirmed')
+		const collidingPosition = input.positions.mysqlResults.find(r => r.legacyProductId === 901)
+		expect(collidingPosition?.outcome).toBe('confirmed')
+		expect(collidingPosition?.matchedOneCIdNoms).toEqual(['900101'])
+
+		const result = await db.transaction(async tx => runCatalogImport(tx, input, 'write'))
+
+		const familyUnit = result.units.find(u => u.key.includes('900') && u.kind === 'legacy_variant_family')!
+		expect(familyUnit.action).toBe('created')
+		expect(familyUnit.variantIds).toHaveLength(2)
+
+		const standaloneUnit = result.units.find(u => u.kind === 'standalone')!
+		expect(standaloneUnit.action).toBe('skipped')
+		expect(standaloneUnit.skipReason).toBe('mapping_conflict_variant')
+
+		// The global invariant: no 1C-ID_nom-derived sku appears twice across
+		// the entire written plan - the actual Postgres rows, not just the
+		// unit outcomes, are the ground truth here.
+		const allVariantRows = await db.select().from(productVariants)
+		const skuCounts = new Map<string, number>()
+		for (const row of allVariantRows) {
+			if (row.sku === null) continue
+			skuCounts.set(row.sku, (skuCounts.get(row.sku) ?? 0) + 1)
+		}
+		for (const [sku, count] of skuCounts) {
+			expect(count, `sku ${sku} must not be written more than once`).toBe(1)
+		}
+
+		const variantRows = await db.select().from(productVariants).where(eq(productVariants.sku, '900101'))
+		expect(variantRows).toHaveLength(1)
+		expect(variantRows[0].productId).toBe(familyUnit.productId!)
+
+		const productRows = await db.select().from(products)
+		expect(productRows).toHaveLength(1) // product 901 never got its own row - zero confirmed variants, never a variant-less orphan
+	})
+})
