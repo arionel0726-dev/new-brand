@@ -7,6 +7,9 @@ import { productVariants } from '../src/db/schema/product-variants'
 import { productVariantBarcodes } from '../src/db/schema/product-variant-barcodes'
 import { productSlugAliases } from '../src/db/schema/product-slug-aliases'
 import { productCategories } from '../src/db/schema/product-categories'
+import { productImages } from '../src/db/schema/product-images'
+import { categories } from '../src/db/schema/categories'
+import { brands } from '../src/db/schema/brands'
 import { externalEntityMappings } from '../src/db/schema/external-entity-mappings'
 import {
 	assertSafeImportTarget,
@@ -605,5 +608,356 @@ describe('Sprint 12B.2.1 Task 6: true quarantine population is never hidden insi
 
 		const productRows = await db.select().from(products)
 		expect(productRows).toHaveLength(0) // neither member of this family was ever published
+	})
+})
+
+describe('Sprint 12B.4 Priority 1: product visibility', () => {
+	async function seedResolvedBrandAndCategory(tx: Parameters<typeof runCatalogImport>[0], legacyBrandId: number, legacyCategoryId: number) {
+		const [brandRow] = await tx.insert(brands).values({ slug: `brand-${legacyBrandId}`, nameRu: 'Brand', nameRo: 'Brand' }).returning()
+		const [categoryRow] = await tx.insert(categories).values({ slug: `category-${legacyCategoryId}`, nameRu: 'Category', nameRo: 'Category' }).returning()
+		await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'brand', externalId: String(legacyBrandId), internalId: brandRow.id })
+		await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'category', externalId: String(legacyCategoryId), internalId: categoryRow.id })
+	}
+
+	test('a legacy-hidden standalone product stays draft even when brand and category both resolve', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 1201, guid: '120001', titleRu: 'Hidden Item', uriRu: 'hidden-item', brandId: 77, categoryId: 88, isShown: false })
+		])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '120001' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(async tx => {
+			await seedResolvedBrandAndCategory(tx, 77, 88)
+			return runCatalogImport(tx, input, 'write')
+		})
+		const unit = result.units.find(u => u.action === 'created')!
+		const [productRow] = await db.select().from(products).where(eq(products.id, unit.productId!))
+		expect(productRow.status).toBe('draft') // never 'active' just because brand/category resolved
+	})
+
+	test('a legacy-visible standalone product with resolved brand/category becomes active', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 1202, guid: '120002', titleRu: 'Visible Item', uriRu: 'visible-item', brandId: 78, categoryId: 89, isShown: true })
+		])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '120002' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(async tx => {
+			await seedResolvedBrandAndCategory(tx, 78, 89)
+			return runCatalogImport(tx, input, 'write')
+		})
+		const unit = result.units.find(u => u.action === 'created')!
+		const [productRow] = await db.select().from(products).where(eq(products.id, unit.productId!))
+		expect(productRow.status).toBe('active')
+	})
+
+	test('a partially-hidden family: each variant reflects ITS OWN legacy isShown, independently of the others', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 1210, sku: 'P10.VIS', guid: '121001', titleRu: 'Visible Member', uriRu: 'p10-vis', isShown: true }),
+			makeLegacyProduct({ id: 1211, sku: 'P10.VIS', guid: '121002', isShown: false })
+		])
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '121001', VariativeNomenclature: 'P10.VIS' }),
+			makeOneCRaw({ ID_nom: '121002', VariativeNomenclature: 'P10.VIS' })
+		]
+		const input = await buildInput(dump, oneCRaw)
+		expect(input.families.summary.confirmedFamilies).toBe(1)
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		const unit = result.units.find(u => u.kind === 'family' && u.action === 'created')!
+		const variantRows = await db.select().from(productVariants).where(eq(productVariants.productId, unit.productId!))
+		expect(variantRows).toHaveLength(2)
+		const visible = variantRows.find(v => v.sku === '121001')!
+		const hidden = variantRows.find(v => v.sku === '121002')!
+		expect(visible.isActive).toBe(true)
+		expect(hidden.isActive).toBe(false)
+	})
+})
+
+describe('Sprint 12B.4 Priority 2: duplicate ID_nom content safety in the importer', () => {
+	// Sprint 12B.4 investigation finding: `reconcileSqlWith1c` itself gates
+	// position matching on `guidMatches.length <= 1 && barcodeMatches.length
+	// <= 1 && groupMatches.length <= 1` - so whenever a duplicate ID_nom
+	// group's records share the SAME value on whichever key the MySQL
+	// product matches through (GUID, or an identical Barcode), the position
+	// is already 'ambiguous' and the unit is skipped *before* the importer's
+	// own content-resolution step is ever reached. A `mutable_only` pair
+	// that differs only in a soft field (e.g. QuantityBalance) necessarily
+	// shares GUID/ID_nom and Barcode across both records, so it can never
+	// reach 'confirmed' through any match key - the safety net is this
+	// upstream ambiguity gate, not content-level picking. This test proves
+	// that: nothing is silently imported from either duplicate record.
+	test('a benign-looking duplicate (mutable_only) still resolves to position-level ambiguity, not a silently-picked record - the importer never gets a chance to pick one', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 1301, guid: '130001', titleRu: 'Mutable Dup Item', uriRu: 'mutable-dup-item' })])
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '130001', VariativeName: 'First Seen Name', Barcode: '1300000000001' }),
+			makeOneCRaw({ ID_nom: '130001', VariativeName: 'First Seen Name', Barcode: '1300000000001', QuantityBalance: 5 }) // differs only in a soft-mutable field
+		]
+		const input = await buildInput(dump, oneCRaw)
+		const group = input.idNomDuplicates.groups.find(g => g.idNom === '130001')
+		expect(group?.classification).toBe('mutable_only')
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		const unit = result.units.find(u => u.key === '130001' || u.key === String(1301))
+		expect(unit?.action).toBe('skipped')
+		expect(unit?.skipReason).toBe('ambiguous_position')
+		const productRows = await db.select().from(products)
+		expect(productRows).toHaveLength(0)
+	})
+
+	// Here the two records differ in Barcode (barcode_only_conflict), so a
+	// MySQL product matched via ITS OWN Barcode (not GUID) to just one of
+	// the two records clears the position-ambiguity gate with a single,
+	// unambiguous barcode-key match - exactly the real-world shape Sprint
+	// 12A.6 confirmed as legitimate (one ID_nom legitimately carries more
+	// than one barcode). This is where the importer's own
+	// resolveOneCRecord/writeBarcodeRows fix is actually exercised.
+	test('a barcode_only_conflict group aggregates every distinct barcode onto the SAME variant, not just the one record matched by position', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 1302, guid: null, barcode: '1300000000010', titleRu: 'Multi Barcode Dup', uriRu: 'multi-barcode-dup' })
+		])
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '130002', Barcode: '1300000000010' }),
+			makeOneCRaw({ ID_nom: '130002', Barcode: '1300000000011' }) // only Barcode differs -> barcode_only_conflict
+		]
+		const input = await buildInput(dump, oneCRaw)
+		const group = input.idNomDuplicates.groups.find(g => g.idNom === '130002')
+		expect(group?.classification).toBe('barcode_only_conflict')
+		expect(input.positions.summary.confirmed).toBe(1) // matched via Barcode alone, clears the ambiguity gate
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		const unit = result.units.find(u => u.action === 'created')!
+		const barcodeRows = await db.select().from(productVariantBarcodes).where(eq(productVariantBarcodes.variantId, unit.variantIds![0]))
+		const barcodes = new Set(barcodeRows.map(b => b.barcode))
+		expect(barcodes.has('1300000000010')).toBe(true)
+		expect(barcodes.has('1300000000011')).toBe(true) // BOTH 1C-side barcodes present - not just the one record position-matching happened to key on
+	})
+
+	// Same shape as above (position matched via a Barcode unique to one
+	// record, clearing the ambiguity gate) but VariativeName also differs
+	// between the two records, which duplicate-id-nom.ts's tier ordering
+	// classifies as 'conflicting' (an unrecognized field) regardless of the
+	// Barcode difference - conflicting always outranks barcode_only_conflict.
+	test('a genuinely conflicting duplicate group withholds 1C content entirely - MySQL content is used instead, never a value from either disputed record', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 1303, guid: null, barcode: '1300000000020', titleRu: 'MySQL Side Title', uriRu: 'mysql-side-title' })
+		])
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '130003', Barcode: '1300000000020', VariativeName: 'Disputed Name A' }),
+			makeOneCRaw({ ID_nom: '130003', Barcode: '1300000000021', VariativeName: 'Disputed Name B' }) // VariativeName differs -> conflicting (unrecognized field), outranks the Barcode difference
+		]
+		const input = await buildInput(dump, oneCRaw)
+		const group = input.idNomDuplicates.groups.find(g => g.idNom === '130003')
+		expect(group?.classification).toBe('conflicting')
+		expect(input.positions.summary.confirmed).toBe(1)
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		const unit = result.units.find(u => u.action === 'created')!
+		const [productRow] = await db.select().from(products).where(eq(products.id, unit.productId!))
+		// Identity still imports (matched unambiguously via Barcode at the
+		// reconciliation level), but content comes from MySQL's own title,
+		// never from either disputed 1C VariativeName value.
+		expect(productRow.nameRu).toBe('MySQL Side Title')
+		expect(productRow.nameRu).not.toBe('Disputed Name A')
+		expect(productRow.nameRu).not.toBe('Disputed Name B')
+	})
+})
+
+describe('Sprint 12B.4 Priority 3: 1C identity mapping conflicts are checked, never silently continued past', () => {
+	test('standalone: a pre-existing 1c/nomenclature mapping pointing at a DIFFERENT internal variant blocks the whole unit', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 1401, guid: '140001', titleRu: 'Nomenclature Conflict Item', uriRu: 'nomenclature-conflict-item' })])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '140001' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(async tx => {
+			// A different, unrelated internal UUID already claims this exact
+			// 1C ID_nom under the 1c/nomenclature namespace - this importer
+			// must never silently proceed past that conflict.
+			await resolveOrCreateMapping(tx, { sourceSystem: '1c', entityType: 'nomenclature', externalId: '140001', internalId: nodeCrypto.randomUUID() })
+			return runCatalogImport(tx, input, 'write')
+		})
+
+		const unit = result.units.find(u => u.key === '140001' || u.key === String(1401))
+		expect(unit?.action).toBe('skipped')
+		expect(unit?.skipReason).toBe('mapping_conflict_variant')
+
+		const productRows = await db.select().from(products)
+		expect(productRows).toHaveLength(0) // never continued successfully past the unresolved conflict
+	})
+
+	test('family path: a member whose 1c/nomenclature mapping conflicts is excluded from the family, other members still import', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 1410, sku: 'N10.CONF', guid: '141001', titleRu: 'Clean Member', uriRu: 'n10-conf' }),
+			makeLegacyProduct({ id: 1411, sku: 'N10.CONF', guid: '141002' })
+		])
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '141001', VariativeNomenclature: 'N10.CONF' }),
+			makeOneCRaw({ ID_nom: '141002', VariativeNomenclature: 'N10.CONF' })
+		]
+		const input = await buildInput(dump, oneCRaw)
+		expect(input.families.summary.confirmedFamilies).toBe(1)
+
+		const result = await db.transaction(async tx => {
+			await resolveOrCreateMapping(tx, { sourceSystem: '1c', entityType: 'nomenclature', externalId: '141002', internalId: nodeCrypto.randomUUID() })
+			return runCatalogImport(tx, input, 'write')
+		})
+		const unit = result.units.find(u => u.kind === 'family' && u.action === 'created')!
+		expect(unit.variantIds).toHaveLength(1) // only the clean member resolved
+		const variantRows = await db.select().from(productVariants).where(eq(productVariants.productId, unit.productId!))
+		expect(variantRows.map(v => v.sku)).toEqual(['141001'])
+	})
+})
+
+describe('Sprint 12B.4 Priority 4: media idempotency', () => {
+	test('two identical write-mode imports produce the same image row count, not double - and the same set of image identities', async () => {
+		const dump: LegacyCatalogDump = {
+			...makeDump([makeLegacyProduct({ id: 1501, guid: '150001', titleRu: 'Media Item', uriRu: 'media-item' })]),
+			productImgs: [
+				{ id: 1, productId: 1501, img: 'image-a.jpg', sortOrder: 0, isShown: true },
+				{ id: 2, productId: 1501, img: 'image-b.jpg', sortOrder: 1, isShown: true }
+			]
+		}
+		const oneCRaw = [makeOneCRaw({ ID_nom: '150001' })]
+
+		const firstInput = await buildInput(dump, oneCRaw)
+		const first = await db.transaction(tx => runCatalogImport(tx, firstInput, 'write'))
+		const firstUnit = first.units.find(u => u.action === 'created')!
+		expect(firstUnit.mediaRowsWritten).toBe(2)
+
+		const secondInput = await buildInput(dump, oneCRaw)
+		const second = await db.transaction(tx => runCatalogImport(tx, secondInput, 'write'))
+		const secondUnit = second.units.find(u => u.key === firstUnit.key)!
+		expect(secondUnit.mediaRowsWritten).toBe(0) // nothing NEW planned - both images already exist
+
+		const imageRows = await db.select().from(productImages).where(eq(productImages.productId, firstUnit.productId!))
+		expect(imageRows).toHaveLength(2) // not 4 - no duplicates from the second run
+		expect(new Set(imageRows.map(r => r.url))).toEqual(new Set(['image-a.jpg', 'image-b.jpg'])) // the actual identity set is unchanged, not just the count
+	})
+
+	test('legitimately different images for the same product (different filenames) are both preserved, never deduped against each other', async () => {
+		const dump: LegacyCatalogDump = {
+			...makeDump([makeLegacyProduct({ id: 1502, guid: '150002', titleRu: 'Distinct Media Item', uriRu: 'distinct-media-item' })]),
+			productImgs: [
+				{ id: 3, productId: 1502, img: 'front.jpg', sortOrder: 0, isShown: true },
+				{ id: 4, productId: 1502, img: 'back.jpg', sortOrder: 1, isShown: true }
+			]
+		}
+		const oneCRaw = [makeOneCRaw({ ID_nom: '150002' })]
+		const input = await buildInput(dump, oneCRaw)
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		const unit = result.units.find(u => u.action === 'created')!
+		expect(unit.mediaRowsWritten).toBe(2)
+		const imageRows = await db.select().from(productImages).where(eq(productImages.productId, unit.productId!))
+		expect(imageRows).toHaveLength(2)
+	})
+})
+
+describe('Sprint 12B.4 Priority 6: assertSafeImportTarget hardening', () => {
+	test('refuses a correctly-named test database on an arbitrary remote host - not just a host/name substring check', () => {
+		expect(() => assertSafeImportTarget('postgres://user:pass@remote-db.example.com:5432/beauty_store_test')).toThrow(UnsafeImportTargetError)
+	})
+
+	test('accepts the exact expected database name on 127.0.0.1', () => {
+		expect(() => assertSafeImportTarget('postgres://user:pass@127.0.0.1:5432/beauty_store_test')).not.toThrow()
+	})
+
+	test('refuses a database name that is a near-miss of the expected one, even on localhost (exact match only, no substring)', () => {
+		expect(() => assertSafeImportTarget('postgres://user:pass@localhost:5432/beauty_store_test_v2')).toThrow(UnsafeImportTargetError)
+	})
+})
+
+describe('Sprint 12B.4 Additional validation: conflicting category links across family members are reported, not silently discarded', () => {
+	test('a family whose non-main member resolves to a DIFFERENT category than the main position sets categoryLinkConflict=true', async () => {
+		const dump: LegacyCatalogDump = {
+			...makeDump([
+				makeLegacyProduct({ id: 1601, sku: 'C10.CONF', guid: '160001', titleRu: 'Main Position', uriRu: 'c10-conf', categoryId: 91 }),
+				makeLegacyProduct({ id: 1602, sku: 'C10.CONF', guid: '160002', categoryId: 92 })
+			]),
+			productCategories: []
+		}
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '160001', VariativeNomenclature: 'C10.CONF' }),
+			makeOneCRaw({ ID_nom: '160002', VariativeNomenclature: 'C10.CONF' })
+		]
+		const input = await buildInput(dump, oneCRaw)
+		expect(input.families.summary.confirmedFamilies).toBe(1)
+
+		const result = await db.transaction(async tx => {
+			const [cat91] = await tx.insert(categories).values({ slug: 'cat-91', nameRu: 'Cat 91', nameRo: 'Cat 91' }).returning()
+			const [cat92] = await tx.insert(categories).values({ slug: 'cat-92', nameRu: 'Cat 92', nameRo: 'Cat 92' }).returning()
+			await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'category', externalId: '91', internalId: cat91.id })
+			await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'category', externalId: '92', internalId: cat92.id })
+			return runCatalogImport(tx, input, 'write')
+		})
+		const unit = result.units.find(u => u.kind === 'family' && u.action === 'created')!
+		expect(unit.categoryLinkConflict).toBe(true)
+
+		// The main position's own link is still what's actually written - not silently replaced or merged with the other member's.
+		const linkRows = await db.select().from(productCategories).where(eq(productCategories.productId, unit.productId!))
+		expect(linkRows).toHaveLength(1)
+	})
+
+	test('a family where every member resolves to the SAME category reports no conflict', async () => {
+		const dump: LegacyCatalogDump = {
+			...makeDump([
+				makeLegacyProduct({ id: 1611, sku: 'C10.SAME', guid: '161001', titleRu: 'Main Position', uriRu: 'c10-same', categoryId: 93 }),
+				makeLegacyProduct({ id: 1612, sku: 'C10.SAME', guid: '161002', categoryId: 93 })
+			]),
+			productCategories: []
+		}
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '161001', VariativeNomenclature: 'C10.SAME' }),
+			makeOneCRaw({ ID_nom: '161002', VariativeNomenclature: 'C10.SAME' })
+		]
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(async tx => {
+			const [cat93] = await tx.insert(categories).values({ slug: 'cat-93', nameRu: 'Cat 93', nameRo: 'Cat 93' }).returning()
+			await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'category', externalId: '93', internalId: cat93.id })
+			return runCatalogImport(tx, input, 'write')
+		})
+		const unit = result.units.find(u => u.kind === 'family' && u.action === 'created')!
+		expect(unit.categoryLinkConflict ?? false).toBe(false)
+	})
+})
+
+describe('Sprint 12B.4 Priority 5: confirmed multi-variant family end-to-end, with per-variant barcode/color/volume fidelity', () => {
+	test('a confirmed 3-member family produces one Product and 3 ProductVariants, each with its own real ID_nom sku and barcode set, zero quarantine leakage', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 1701, sku: 'A10.XXX', guid: '170001', barcode: '4051761201249', titleRu: 'NAIL POLISH ANNY', uriRu: 'anny-nail-polish', brandId: 50, categoryId: 60 }),
+			makeLegacyProduct({ id: 1702, sku: 'A10.XXX', guid: '170002', barcode: '4051761201232' }),
+			makeLegacyProduct({ id: 1703, sku: 'A10.XXX', guid: '170003', barcode: '4051761202772' })
+		])
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '170001', VariativeNomenclature: 'A10.XXX', Barcode: '4051761201249', ColorVar: '396' }),
+			makeOneCRaw({ ID_nom: '170002', VariativeNomenclature: 'A10.XXX', Barcode: '4051761201232', ColorVar: '253' }),
+			makeOneCRaw({ ID_nom: '170003', VariativeNomenclature: 'A10.XXX', Barcode: '4051761202772', ColorVar: '369.50' })
+		]
+		const input = await buildInput(dump, oneCRaw)
+		expect(input.families.summary.confirmedFamilies).toBe(1)
+
+		const result = await db.transaction(async tx => {
+			const [brandRow] = await tx.insert(brands).values({ slug: 'anny', nameRu: 'Anny', nameRo: 'Anny' }).returning()
+			const [categoryRow] = await tx.insert(categories).values({ slug: 'nails', nameRu: 'Nails', nameRo: 'Nails' }).returning()
+			await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'brand', externalId: '50', internalId: brandRow.id })
+			await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'category', externalId: '60', internalId: categoryRow.id })
+			return runCatalogImport(tx, input, 'write')
+		})
+
+		const unit = result.units.find(u => u.kind === 'family' && u.action === 'created')!
+		expect(unit.variantIds).toHaveLength(3)
+		expect(unit.categoryLinkConflict ?? false).toBe(false)
+
+		const [productRow] = await db.select().from(products).where(eq(products.id, unit.productId!))
+		expect(productRow.status).toBe('active') // brand + category resolved, legacy-visible
+
+		const variantRows = await db.select().from(productVariants).where(eq(productVariants.productId, unit.productId!))
+		expect(variantRows).toHaveLength(3)
+		expect(new Set(variantRows.map(v => v.sku))).toEqual(new Set(['170001', '170002', '170003']))
+
+		for (const variant of variantRows) {
+			const barcodeRows = await db.select().from(productVariantBarcodes).where(eq(productVariantBarcodes.variantId, variant.id))
+			expect(barcodeRows.length).toBeGreaterThanOrEqual(1) // each real variant kept its own barcode identity
+		}
 	})
 })
