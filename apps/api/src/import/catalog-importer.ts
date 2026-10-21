@@ -151,18 +151,73 @@ export type CatalogImportUnitOutcome = {
 export type CatalogImportSlugAliasConflict = { locale: string; slug: string; note: string }
 
 export type CatalogImportSummary = {
+	/** 'dry-run' or 'write' - read this before interpreting any count below: in dry-run mode every *Written/*Planned number below is a PREVIEW (computed, never persisted); in write mode it reflects rows actually committed to Postgres. */
 	mode: CatalogImportMode
+	/** Count of import UNITS considered - one per confirmed family, one per unresolved-family MEMBER (Sprint 12B.2.1 Task 6: each member of an unresolved family is now its own unit, not lumped into one family-level unit), and one per standalone legacy product. Sums to created + updated + skipped. */
 	totalUnits: number
+	/** Count of units where a NEW Product row was (write mode) or would be (dry-run) inserted. */
 	productsCreated: number
+	/** Count of units where an EXISTING Product row was (write mode) or would be (dry-run) updated - a second run against identical input lands here, not in productsCreated (Task 16's idempotency guarantee). */
 	productsUpdated: number
+	/** Count of units that produced no Product at all - sum of bySkipReason's values. */
 	unitsSkipped: number
 	bySkipReason: Record<CatalogImportSkipReason, number>
+	/**
+	 * Sum of planned/written ProductVariant rows across EVERY created/updated
+	 * unit (family-derived and standalone-default variants both count, in
+	 * both modes). Sprint 12B.2.1 Task 2 fix: a real dry-run previously
+	 * reported 16 here against 5972 `productsCreated`, because the
+	 * standalone import path's dry-run branch never set `variantIds` on its
+	 * returned unit at all - only family-matched units contributed anything
+	 * to this sum. Standalone positions are the majority of real legacy
+	 * data (most products have no VariativeNomenclature), so this number was
+	 * a near-total undercount, not evidence that standalone products were
+	 * missing their default variant - they were planned correctly, just not
+	 * counted.
+	 */
 	variantsWritten: number
+	/**
+	 * Sum of planned/written product_variant_barcodes rows. Sprint 12B.2.1
+	 * Task 3 fix: a real dry-run previously reported this as 0
+	 * unconditionally, for every unit, in every run, regardless of real
+	 * data - both import paths' dry-run branches returned before
+	 * `writeBarcodeRows` was ever called. This was a pure dry-run reporting
+	 * gap: write mode's barcode-planning logic itself was already correct
+	 * and untouched by this fix.
+	 */
 	barcodesWritten: number
+	/**
+	 * Count of created/updated units with ZERO resolved category links.
+	 * Sprint 12B.2.1 Task 8/9 fix: previously keyed off the raw LEGACY
+	 * `categoryId` being null, not off whether a V2 category mapping
+	 * actually resolved - a product with a non-null legacy category id but
+	 * no matching V2 mapping yet was silently published `active` with zero
+	 * `product_categories` rows. Now keyed off the real resolved-link count.
+	 */
 	unpublishedForMissingCategory: number
 	unpublishedForMissingBrand: number
+	/**
+	 * Count of slug/locale collisions with a DIFFERENT product, detected and
+	 * never auto-reassigned. Sprint 12B.2.1 Task 8 fix: a real dry-run
+	 * previously reported this as 0 unconditionally for the same reason as
+	 * `barcodesWritten` - `writeSlugAliases`'s collision-detecting `select`
+	 * was never reached in dry-run mode at all, so "zero conflicts" was not
+	 * evidence the real data has none; the check had simply never run.
+	 */
 	slugAliasConflicts: number
 	mediaRowsWritten: number
+	/**
+	 * Sprint 12B.2.1 Task 6: the TRUE total count of legacy MySQL products
+	 * whose reconciliation outcome is `'quarantine'`, read directly from
+	 * `reconcileSqlWith1c`'s own summary (computed over every product in the
+	 * dump, unconditionally - independent of this importer's family/
+	 * standalone unit-bucketing). Compare against `bySkipReason.quarantine`:
+	 * the two should now match (the Task 6 fix makes every family member's
+	 * quarantine status individually visible as its own unit), and a future
+	 * mismatch between them is itself evidence of a regression in that
+	 * per-member surfacing, not a number to reconcile by hand.
+	 */
+	quarantinedPositionsTotal: number
 	examples: {
 		created: { key: string; productId: string }[]
 		skipped: { key: string; reason: CatalogImportSkipReason }[]
@@ -250,10 +305,39 @@ function canonicalSlugFor(mainPosition: LegacyProduct, externalId: string): { sl
  * outcome) - a product "colliding" with its own prior slug is not a
  * collision at all.
  */
-async function ensureUniqueSlug(tx: Tx, baseSlug: string, externalId: string, existingProductId: string | null): Promise<string> {
+/**
+ * In dry-run mode no row is ever persisted, so two sibling units processed
+ * within the SAME `runCatalogImport` call can never see each other's slug
+ * via a DB read (Sprint 12B.2.1 Task 8 finding: a dry-run over two
+ * confirmed products sharing a colliding legacy `uriRu` reported ZERO
+ * `slugAliasConflicts`, because neither product's slug/alias was ever
+ * actually written for the SECOND unit's read to find). This ledger tracks
+ * "claimed" canonical slugs and aliases in memory for the duration of one
+ * dry-run call, so collision detection is a faithful preview of what write
+ * mode would find once prior units in the SAME run had actually committed.
+ * `null` in write mode - the DB itself already plays this role there, since
+ * writes commit and become visible to later reads within the same
+ * transaction.
+ */
+type DryRunSlugLedger = { canonical: Map<string, string>; aliases: Map<string, string> }
+
+async function ensureUniqueSlug(
+	tx: Tx,
+	baseSlug: string,
+	externalId: string,
+	existingProductId: string | null,
+	claimingProductId: string,
+	ledger: DryRunSlugLedger | null
+): Promise<string> {
 	const [existing] = await tx.select({ id: products.id }).from(products).where(eq(products.slug, baseSlug)).limit(1)
-	if (!existing || existing.id === existingProductId) return baseSlug
-	return `${baseSlug}-${externalId}`
+	let collides = existing !== undefined && existing.id !== existingProductId
+	if (!collides && ledger) {
+		const claimedBy = ledger.canonical.get(baseSlug)
+		if (claimedBy !== undefined && claimedBy !== claimingProductId) collides = true
+	}
+	const finalSlug = collides ? `${baseSlug}-${externalId}` : baseSlug
+	if (ledger) ledger.canonical.set(finalSlug, claimingProductId)
+	return finalSlug
 }
 
 type ContentSource = {
@@ -285,6 +369,31 @@ function buildContent(mainPosition: LegacyProduct, oneCRecord: ProductsFeedRecor
 	}
 }
 
+/**
+ * Read-only prediction of whether `resolveOrCreateMapping` would return
+ * `'conflict'` for this (sourceSystem, entityType, externalId) if a FRESH
+ * internalId were generated for it, WITHOUT ever generating or using one.
+ * `resolveIdentity` already does this correctly (look up any existing
+ * mapping first, reuse ITS internalId) - this is a documentation note, not
+ * a second implementation: every variant-identity resolution in this file
+ * must go through `resolveIdentity`, never a bare `resolveOrCreateMapping`
+ * call with a freshly-`crypto.randomUUID()`-generated internalId. Calling
+ * `resolveOrCreateMapping` directly with a fresh random internalId on a
+ * SECOND run against the same external id deterministically mis-reports a
+ * legitimate repeat import as `{outcome:'conflict', reason:
+ * 'external_id_points_elsewhere'}` (the existing row's internalId - the
+ * real, original one - never equals this run's brand-new random guess).
+ * This was a real bug in this file prior to Sprint 12B.2.1: variant
+ * mappings (both the legacy_mysql/product_variant and the 1c/nomenclature
+ * mapping created alongside it) were resolved via a bare
+ * `resolveOrCreateMapping` call, so every SECOND run of the importer over
+ * the same confirmed family/standalone position would see 100% of its
+ * variants falsely conflict - breaking both Task 16's idempotency
+ * guarantee and Task 4's "every planned Product has at least one planned
+ * ProductVariant" invariant on any re-run. Fixed by routing variant
+ * identity resolution through `resolveIdentity` exactly like the product
+ * identity resolution already did.
+ */
 async function writeProductRow(
 	tx: Tx,
 	mapping: ResolvedMapping,
@@ -370,9 +479,20 @@ async function writeVariantRow(
  * position. Every other distinct barcode for the same position is still
  * recorded, just not marked primary.
  */
-async function writeBarcodeRows(tx: Tx, variantId: string, mysqlBarcode: string | null, oneCBarcodes: Set<string>): Promise<number> {
+/**
+ * `dryRun` gates ONLY the mutating `insert`/`update` calls at the bottom of
+ * the loop - every read (the primary-collision check, the
+ * already-exists-for-this-variant check) still runs in both modes, so the
+ * returned count is a real, DB-state-aware preview in dry-run, not a naive
+ * in-memory guess (Sprint 12B.2.1 Task 3: dry-run mode previously never
+ * called this function at all for EITHER import path, so `barcodesWritten`
+ * was unconditionally 0 in every dry-run regardless of what real data would
+ * produce - a pure reporting gap, not evidence the real barcode-planning
+ * logic was broken).
+ */
+async function writeBarcodeRows(tx: Tx, variantId: string, mysqlBarcode: string | null, oneCBarcodes: Set<string>, dryRun: boolean): Promise<number> {
 	const ordered = [...(mysqlBarcode !== null ? [mysqlBarcode] : []), ...[...oneCBarcodes].filter(b => b !== mysqlBarcode)]
-	let written = 0
+	let planned = 0
 	for (const [index, barcode] of ordered.entries()) {
 		const wantsPrimary = index === 0
 		let isPrimary = wantsPrimary
@@ -395,24 +515,39 @@ async function writeBarcodeRows(tx: Tx, variantId: string, mysqlBarcode: string 
 			.where(and(eq(productVariantBarcodes.variantId, variantId), eq(productVariantBarcodes.barcode, barcode)))
 			.limit(1)
 		if (existingForVariant) {
-			if (existingForVariant.isPrimary !== isPrimary) {
+			if (!dryRun && existingForVariant.isPrimary !== isPrimary) {
 				await tx.update(productVariantBarcodes).set({ isPrimary }).where(eq(productVariantBarcodes.id, existingForVariant.id))
 			}
 			continue
 		}
-		await tx.insert(productVariantBarcodes).values({ variantId, barcode, isPrimary, source: mysqlBarcode === barcode ? 'legacy_mysql' : '1c' })
-		written++
+		if (!dryRun) {
+			await tx.insert(productVariantBarcodes).values({ variantId, barcode, isPrimary, source: mysqlBarcode === barcode ? 'legacy_mysql' : '1c' })
+		}
+		planned++
 	}
-	return written
+	return planned
 }
 
-/** Writes the canonical slug alias plus every known legacy uri as its own alias row. A locale/slug collision with a DIFFERENT product is reported and skipped (Task from the user's testing list: "SEO alias conflicts") - never overwritten, never crashes the run. */
+/**
+ * Writes the canonical slug alias plus every known legacy uri as its own
+ * alias row. A locale/slug collision with a DIFFERENT product is reported
+ * and skipped (Task from the user's testing list: "SEO alias conflicts") -
+ * never overwritten, never crashes the run. `dryRun` gates only the final
+ * `insert` - the collision-detecting `select` always runs, so `conflicts`
+ * is populated correctly in both modes (Sprint 12B.2.1 Task 8: dry-run mode
+ * previously returned before this function was ever called at all for
+ * EITHER import path, so "zero alias conflicts" in a dry-run summary was
+ * not evidence of a clean real dataset - the conflict check had simply
+ * never run. Same root cause and same fix shape as the barcode gap above).
+ */
 async function writeSlugAliases(
 	tx: Tx,
 	productId: string,
 	canonicalSlug: string,
 	legacyUris: { locale: 'ru' | 'ro'; slug: string; source: string; isCanonical: boolean }[],
-	conflicts: CatalogImportSlugAliasConflict[]
+	conflicts: CatalogImportSlugAliasConflict[],
+	dryRun: boolean,
+	ledger: DryRunSlugLedger | null
 ): Promise<void> {
 	const rows = [{ locale: 'ru' as const, slug: canonicalSlug, source: 'v2_generated_or_legacy_slug', isCanonical: true }, ...legacyUris]
 	const seen = new Set<string>()
@@ -432,20 +567,33 @@ async function writeSlugAliases(
 			}
 			continue
 		}
+		if (ledger) {
+			const claimedBy = ledger.aliases.get(dedupeKey)
+			if (claimedBy !== undefined && claimedBy !== productId) {
+				conflicts.push({ locale: row.locale, slug: row.slug, note: 'slug already claimed by a different product earlier in this same dry-run - not reassigned' })
+				continue
+			}
+			ledger.aliases.set(dedupeKey, productId)
+		}
+		if (dryRun) continue
 		await tx.insert(productSlugAliases).values({ productId, locale: row.locale, slug: row.slug, isCanonical: row.isCanonical, source: row.source })
 	}
 }
 
+/** Purely in-memory candidate selection against the already-loaded `dump` - no DB read needed to know what WOULD be written, so `dryRun` gates only the final `insert`. */
 async function writeMediaRows(
 	tx: Tx,
 	dump: LegacyCatalogDump,
 	productId: string,
 	memberMysqlIds: number[],
-	variantIdByMysqlId: Map<number, string>
+	variantIdByMysqlId: Map<number, string>,
+	dryRun: boolean
 ): Promise<number> {
-	let written = 0
+	let planned = 0
 	for (const img of dump.productImgs) {
 		if (!memberMysqlIds.includes(img.productId) || img.img === null) continue
+		planned++
+		if (dryRun) continue
 		const variantId = variantIdByMysqlId.get(img.productId) ?? null
 		await tx.insert(productImages).values({
 			productId,
@@ -453,9 +601,8 @@ async function writeMediaRows(
 			url: img.img,
 			sortOrder: img.sortOrder ?? 0
 		})
-		written++
 	}
-	return written
+	return planned
 }
 
 function skipUnit(kind: CatalogImportUnitKind, key: string, reason: CatalogImportSkipReason, note: string): CatalogImportUnitOutcome {
@@ -475,13 +622,11 @@ function skipUnit(kind: CatalogImportUnitKind, key: string, reason: CatalogImpor
 export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: CatalogImportMode): Promise<CatalogImportResult> {
 	const dryRun = mode === 'dry-run'
 	const units: CatalogImportUnitOutcome[] = []
+	const slugLedger: DryRunSlugLedger | null = dryRun ? { canonical: new Map(), aliases: new Map() } : null
 
 	const oneCByIdNom = new Map(input.oneCRecords.map(r => [r.ID_nom, r]))
 	const productById = new Map(input.dump.products.map(p => [p.id, p]))
 	const positionByLegacyId = new Map(input.positions.mysqlResults.map(r => [r.legacyProductId, r]))
-	const conflictingIdNoms = new Set(
-		input.idNomDuplicates.groups.filter(g => g.classification === 'conflicting' || g.classification === 'price_conflict').map(g => g.idNom)
-	)
 
 	const handledLegacyIds = new Set<number>()
 
@@ -491,8 +636,43 @@ export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: 
 		for (const id of family.mysqlMemberIds) handledLegacyIds.add(id)
 
 		if (family.outcome !== 'confirmed_family' || family.collisionRisk) {
-			const reason: CatalogImportSkipReason = family.outcome === 'ambiguous_family' ? (family.collisionRisk ? 'collision_risk_family' : 'ambiguous_family') : 'unmatched_family'
-			units.push(skipUnit('family', family.normalizedCode, reason, family.reasoning))
+			// Sprint 12B.2.1 Task 6 fix: an unresolved family used to collapse
+			// ALL of its members into one lumped skip unit, with the reason
+			// taken from the FAMILY's own outcome only - so a member that was
+			// individually quarantined (e.g. by the Sprint 12A.2 catalog
+			// dry-run) never surfaced as `quarantine` in `bySkipReason` at all
+			// whenever its family also happened to be ambiguous/unmatched/
+			// collision-risk. This is the real, code-grounded explanation for
+			// why a dry-run's `bySkipReason.quarantine` undercounted against
+			// the true total quarantine population
+			// (`input.positions.summary.quarantine`, exposed below as
+			// `quarantinedPositionsTotal`): some genuinely-quarantined legacy
+			// products were invisible here, hidden inside a family-level
+			// bucket. Now each member gets its OWN unit, carrying its OWN true
+			// position-level outcome (quarantine takes priority, exactly as
+			// `reconcileSqlWith1c` itself already decides it), so no member's
+			// individual status is ever lost inside a family-level lump.
+			for (const memberId of family.mysqlMemberIds) {
+				const position = positionByLegacyId.get(memberId)
+				const reason: CatalogImportSkipReason =
+					position?.outcome === 'quarantine'
+						? 'quarantine'
+						: position?.outcome === 'ambiguous'
+							? 'ambiguous_position'
+							: family.outcome === 'ambiguous_family'
+								? family.collisionRisk
+									? 'collision_risk_family'
+									: 'ambiguous_family'
+								: 'unmatched_family'
+				units.push(
+					skipUnit(
+						'family',
+						`${family.normalizedCode}:${memberId}`,
+						reason,
+						position ? `member of unresolved family (${family.reasoning}) - this member's own position-level status: ${position.reasoning}` : family.reasoning
+					)
+				)
+			}
 			continue
 		}
 
@@ -503,7 +683,7 @@ export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: 
 			continue
 		}
 
-		const outcome = await importFamily(tx, family, confirmedPositions, productById, oneCByIdNom, conflictingIdNoms, input.dump, dryRun)
+		const outcome = await importFamily(tx, family, confirmedPositions, productById, oneCByIdNom, input.dump, dryRun, slugLedger)
 		units.push(outcome)
 
 		for (const p of positions) {
@@ -526,22 +706,61 @@ export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: 
 			continue
 		}
 
-		const outcome = await importStandalone(tx, product, position.matchedOneCIdNoms[0], oneCByIdNom, conflictingIdNoms, input.dump, dryRun)
+		const outcome = await importStandalone(tx, product, position.matchedOneCIdNoms[0], oneCByIdNom, input.dump, dryRun, slugLedger)
 		units.push(outcome)
 	}
 
-	return buildResult(units, mode)
+	// Sprint 12B.2.1 Task 6: the TRUE total quarantine population, read
+	// directly from `reconcileSqlWith1c`'s own per-legacy-product summary -
+	// computed unconditionally over every product in the dump, independent
+	// of this importer's family/standalone unit-bucketing. Always equal to
+	// (or, now that the Task 6 fix above surfaces every family member's own
+	// status, consistent with) `bySkipReason.quarantine`'s sum once every
+	// member is individually visible - kept as a SEPARATE field rather than
+	// folded into `bySkipReason` so a future regression in the per-member
+	// surfacing above is immediately visible as a mismatch between the two
+	// numbers, instead of silently reintroducing the undercount.
+	return buildResult(units, mode, input.positions.summary.quarantine)
 }
 
+/**
+ * Thrown when every one of a confirmed family's or standalone position's
+ * variant-identity mappings resolved to `'conflict'` - i.e. this unit would
+ * otherwise produce a Product with zero planned ProductVariants. Rolls back
+ * the whole write-mode transaction (Requirement 17's rollback guarantee)
+ * rather than letting a variant-less product slip through. A genuine
+ * external-id-points-elsewhere conflict for EVERY member of a family is an
+ * identity collision that needs a human decision, not an automatic partial
+ * import (Sprint 12B.2.1 Task 4).
+ */
+export class ZeroVariantProductError extends Error {
+	constructor(kind: CatalogImportUnitKind, key: string) {
+		super(`${kind} unit "${key}" would produce a Product with zero planned ProductVariants (every member's variant-identity mapping conflicted) - aborting rather than publishing an orphan product`)
+	}
+}
+
+/**
+ * Builds the entire write/plan for one confirmed family. Dry-run and write
+ * modes now run the SAME code path end to end - every mutating `insert`/
+ * `update` is gated by `dryRun` inside the `write*` helpers themselves, not
+ * by an early return here - so a dry-run summary is a faithful preview of
+ * every write mode would perform (brand/category resolution, slug
+ * collision detection, barcode planning, media planning), not just the
+ * product-mapping decision. This fixes the Sprint 12B.2.1 real-run findings:
+ * dry-run `variantIds`/`barcodesWritten`/`slugAliasConflicts`/
+ * `unpublishedFor*` were previously either missing or hard-coded absent
+ * for every unit, because the function returned before computing any of
+ * them.
+ */
 async function importFamily(
 	tx: Tx,
 	family: FamilyMatch,
 	confirmedPositions: (FamilyPositionResult & { outcome: 'confirmed_position' })[],
 	productById: Map<number, LegacyProduct>,
 	oneCByIdNom: Map<string, ProductsFeedRecord>,
-	_conflictingIdNoms: Set<string>,
 	dump: LegacyCatalogDump,
-	dryRun: boolean
+	dryRun: boolean,
+	slugLedger: DryRunSlugLedger | null
 ): Promise<CatalogImportUnitOutcome> {
 	const members = confirmedPositions.map(p => productById.get(p.mysqlProductId)).filter((p): p is LegacyProduct => p !== undefined)
 	const mainPosition = pickMainPosition(members)
@@ -561,82 +780,119 @@ async function importFamily(
 	if (productMapping.outcome === 'conflict') {
 		return skipUnit('family', externalId, 'mapping_conflict_product', 'external_entity_mappings conflict for this nomenclature_group - never auto-resolved')
 	}
+	const productId = productMapping.mapping.internalId
+	const existingProductId = productMapping.outcome === 'existing' ? productId : null
 
-	if (dryRun) {
-		return {
-			kind: 'family',
-			key: externalId,
-			action: productMapping.outcome === 'created' ? 'created' : 'updated',
-			productId: productMapping.mapping.internalId,
-			variantIds: confirmedPositions.map(p => p.mysqlProductId.toString()),
-			note: `dry-run: would ${productMapping.outcome === 'created' ? 'create' : 'update'} family product with ${confirmedPositions.length} variant(s)`
-		}
-	}
-
-	const brandId = mainPosition.brandId !== null ? await resolveBrandId(tx, mainPosition.brandId) : null
-	const existingProductId = productMapping.outcome === 'existing' ? productMapping.mapping.internalId : null
-	const uniqueSlug = await ensureUniqueSlug(tx, slug, externalId, existingProductId)
-	const { productId, action } = await writeProductRow(tx, productMapping, candidateProductId, {
-		brandId,
-		slug: uniqueSlug,
-		content,
-		status: brandId === null || mainPosition.categoryId === null ? 'draft' : 'active'
-	})
-
-	await writeCategoryLinks(tx, productId, mainPosition, dump)
-
-	const conflicts: CatalogImportSlugAliasConflict[] = []
-	const legacyUris: { locale: 'ru' | 'ro'; slug: string; source: string; isCanonical: boolean }[] = []
-	if (mainPosition.uriRu !== null) legacyUris.push({ locale: 'ru', slug: mainPosition.uriRu.trim().toLowerCase(), source: 'legacy_uri_ru', isCanonical: false })
-	if (mainPosition.uriRo !== null) legacyUris.push({ locale: 'ro', slug: mainPosition.uriRo.trim().toLowerCase(), source: 'legacy_uri_ro', isCanonical: false })
-	await writeSlugAliases(tx, productId, uniqueSlug, legacyUris, conflicts)
-
-	const variantIds: string[] = []
-	let barcodesWritten = 0
-	const variantIdByMysqlId = new Map<number, string>()
+	// Phase 1: IDENTITY resolution only (external_entity_mappings has no FK
+	// to products/product_variants, so this is always safe before the
+	// product row exists). Runs for every confirmed member BEFORE any
+	// product-level write is attempted, so a family where every member's
+	// variant mapping conflicts never gets as far as writing a product row
+	// at all (Task 4's "every planned Product has at least one planned
+	// ProductVariant" invariant) - but the ACTUAL `product_variants`/
+	// `product_variant_barcodes` inserts are deferred to Phase 3 below,
+	// because both tables have a hard FK to a row that does not exist yet
+	// at this point (`product_variants.product_id -> products.id`). Writing
+	// them here, before the product row, was a real bug found while
+	// verifying this fix: every write-mode family/standalone import failed
+	// outright with a foreign-key violation, which is why this ordering
+	// fix ships together with the zero-variant-invariant fix rather than
+	// as a separate change - the two are inseparable once variant
+	// resolution moves ahead of the product write.
+	type ResolvedVariant = { member: LegacyProduct; idNom: string; oneC: ProductsFeedRecord | undefined; candidateVariantId: string; variantMapping: ResolvedMapping; variantId: string }
+	const resolved: ResolvedVariant[] = []
 	for (const pos of confirmedPositions) {
 		const member = productById.get(pos.mysqlProductId)
 		if (!member) continue
 		const idNom = pos.matchedOneCIdNoms[0]
 		const oneC = oneCByIdNom.get(idNom)
 		const candidateVariantId = crypto.randomUUID()
-		const variantMapping = await resolveOrCreateMapping(tx, {
+		// Routed through resolveIdentity, NOT a bare resolveOrCreateMapping
+		// call - see the comment above writeProductRow for why a fresh
+		// random internalId on every run would otherwise falsely conflict
+		// on every re-run (Sprint 12B.2.1's idempotency fix).
+		const variantMapping = await resolveIdentity(tx, mode, {
 			sourceSystem: 'legacy_mysql',
 			entityType: 'product_variant',
 			externalId: String(member.id),
 			internalId: candidateVariantId
 		})
 		if (variantMapping.outcome === 'conflict') continue
-		// Requirement 6: the real matched 1C ID_nom is always used verbatim as
-		// product_variants.sku, regardless of whether this ID_nom also
-		// appears in idNomDuplicates (a real legacy identifier stays real
-		// even when it has a duplicate-group classification elsewhere in the
-		// feed - only its CONTENT, never its use as a stable identifier,
-		// would be affected by that classification, and this importer never
-		// sources content from a conflicting/price_conflict duplicate group).
-		const variantId = await writeVariantRow(tx, variantMapping, candidateVariantId, productId, {
-			sku: idNom,
-			nameRu: member.titleRu !== mainPosition.titleRu ? member.titleRu : null,
-			nameRo: member.titleRo !== mainPosition.titleRo ? member.titleRo : null
-		})
+		const variantId = variantMapping.mapping.internalId
 		// Second, independent mapping under the 1c namespace for the same
 		// variant - both namespaces stay independent (never merged by a
 		// shared externalId string) per the standing identity-namespace rule.
-		await resolveOrCreateMapping(tx, { sourceSystem: '1c', entityType: 'nomenclature', externalId: idNom, internalId: variantId })
-		variantIdByMysqlId.set(member.id, variantId)
-		variantIds.push(variantId)
+		await resolveIdentity(tx, mode, { sourceSystem: '1c', entityType: 'nomenclature', externalId: idNom, internalId: variantId })
+		resolved.push({ member, idNom, oneC, candidateVariantId, variantMapping, variantId })
+	}
+
+	if (resolved.length === 0) {
+		if (!dryRun) throw new ZeroVariantProductError('family', externalId)
+		return skipUnit('family', externalId, 'unmatched_position', "every confirmed member's variant-identity mapping conflicted - would publish zero variants, so this family is skipped rather than auto-published")
+	}
+
+	// Phase 2: read-only computations that don't need the product row to
+	// exist (brand mapping lookup, slug-collision check against OTHER
+	// products' already-committed rows).
+	const brandId = mainPosition.brandId !== null ? await resolveBrandId(tx, mainPosition.brandId) : null
+	const uniqueSlug = await ensureUniqueSlug(tx, slug, externalId, existingProductId, productId, slugLedger)
+
+	// Phase 3: now that at least one variant is guaranteed, write the
+	// product row FIRST (every downstream write in this function has an FK
+	// to `products.id`), then everything that depends on it.
+	const { linkedCategoryIds } = await writeCategoryLinksPreview(tx, mainPosition, dump)
+	const unpublishedForMissingCategory = linkedCategoryIds.length === 0
+	const status: 'draft' | 'active' = brandId === null || unpublishedForMissingCategory ? 'draft' : 'active'
+
+	let action: 'created' | 'updated'
+	if (!dryRun) {
+		const written = await writeProductRow(tx, productMapping, candidateProductId, { brandId, slug: uniqueSlug, content, status })
+		action = written.action
+	} else {
+		action = productMapping.outcome === 'created' ? 'created' : 'updated'
+	}
+
+	if (!dryRun) await persistCategoryLinks(tx, productId, linkedCategoryIds)
+
+	const variantIds: string[] = []
+	let barcodesPlanned = 0
+	const variantIdByMysqlId = new Map<number, string>()
+	for (const r of resolved) {
+		if (!dryRun) {
+			// Requirement 6: the real matched 1C ID_nom is always used verbatim
+			// as product_variants.sku, regardless of whether this ID_nom also
+			// appears in idNomDuplicates (a real legacy identifier stays real
+			// even when it has a duplicate-group classification elsewhere in
+			// the feed - only its CONTENT, never its use as a stable
+			// identifier, would be affected, and this importer never sources
+			// content from a conflicting/price_conflict duplicate group).
+			await writeVariantRow(tx, r.variantMapping, r.candidateVariantId, productId, {
+				sku: r.idNom,
+				nameRu: r.member.titleRu !== mainPosition.titleRu ? r.member.titleRu : null,
+				nameRo: r.member.titleRo !== mainPosition.titleRo ? r.member.titleRo : null
+			})
+		}
+		variantIdByMysqlId.set(r.member.id, r.variantId)
+		variantIds.push(r.variantId)
 
 		const oneCBarcodes = new Set<string>()
-		if (oneC?.Barcode) oneCBarcodes.add(oneC.Barcode)
-		barcodesWritten += await writeBarcodeRows(tx, variantId, member.barcode, oneCBarcodes)
+		if (r.oneC?.Barcode) oneCBarcodes.add(r.oneC.Barcode)
+		barcodesPlanned += await writeBarcodeRows(tx, r.variantId, r.member.barcode, oneCBarcodes, dryRun)
 	}
+
+	const conflicts: CatalogImportSlugAliasConflict[] = []
+	const legacyUris: { locale: 'ru' | 'ro'; slug: string; source: string; isCanonical: boolean }[] = []
+	if (mainPosition.uriRu !== null) legacyUris.push({ locale: 'ru', slug: mainPosition.uriRu.trim().toLowerCase(), source: 'legacy_uri_ru', isCanonical: false })
+	if (mainPosition.uriRo !== null) legacyUris.push({ locale: 'ro', slug: mainPosition.uriRo.trim().toLowerCase(), source: 'legacy_uri_ro', isCanonical: false })
+	await writeSlugAliases(tx, productId, uniqueSlug, legacyUris, conflicts, dryRun, slugLedger)
 
 	const mediaWritten = await writeMediaRows(
 		tx,
 		dump,
 		productId,
 		members.map(m => m.id),
-		variantIdByMysqlId
+		variantIdByMysqlId,
+		dryRun
 	)
 
 	return {
@@ -645,23 +901,24 @@ async function importFamily(
 		action,
 		productId,
 		variantIds,
-		barcodesWritten,
+		barcodesWritten: barcodesPlanned,
 		mediaRowsWritten: mediaWritten,
 		slugAliasConflicts: conflicts,
 		unpublishedForMissingBrand: brandId === null,
-		unpublishedForMissingCategory: mainPosition.categoryId === null,
-		note: `${action} family product (${variantIds.length} variant(s), ${barcodesWritten} barcode row(s), ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s))`
+		unpublishedForMissingCategory,
+		note: `${dryRun ? 'dry-run: would ' : ''}${action} family product (${variantIds.length} variant(s), ${barcodesPlanned} barcode row(s) ${dryRun ? 'planned' : 'written'}, ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s))`
 	}
 }
 
+/** Same unified dry-run/write code path as importFamily - see its doc comment. */
 async function importStandalone(
 	tx: Tx,
 	product: LegacyProduct,
 	idNom: string,
 	oneCByIdNom: Map<string, ProductsFeedRecord>,
-	_conflictingIdNoms: Set<string>,
 	dump: LegacyCatalogDump,
-	dryRun: boolean
+	dryRun: boolean,
+	slugLedger: DryRunSlugLedger | null
 ): Promise<CatalogImportUnitOutcome> {
 	const oneC = oneCByIdNom.get(idNom)
 	const externalId = product.guid ?? String(product.id)
@@ -674,51 +931,48 @@ async function importStandalone(
 	if (productMapping.outcome === 'conflict') {
 		return skipUnit('standalone', externalId, 'mapping_conflict_product', 'external_entity_mappings conflict for this product - never auto-resolved')
 	}
+	const productId = productMapping.mapping.internalId
+	const existingProductId = productMapping.outcome === 'existing' ? productId : null
 
-	if (dryRun) {
-		return {
-			kind: 'standalone',
-			key: externalId,
-			action: productMapping.outcome === 'created' ? 'created' : 'updated',
-			productId: productMapping.mapping.internalId,
-			note: `dry-run: would ${productMapping.outcome === 'created' ? 'create' : 'update'} standalone product + default variant`
-		}
+	// Phase 1: resolve the single default variant's IDENTITY only (external_entity_mappings has no FK to products/product_variants - safe before the product row exists). The product_variants row itself is written in Phase 3, after the product row (see importFamily's doc comment for why this ordering is not optional - a bug here was the direct cause of the Sprint 12B.2.1 real-run foreign-key failures).
+	const candidateVariantId = crypto.randomUUID()
+	const variantMapping = await resolveIdentity(tx, mode, { sourceSystem: 'legacy_mysql', entityType: 'product_variant', externalId, internalId: candidateVariantId })
+	if (variantMapping.outcome === 'conflict') {
+		return skipUnit('standalone', externalId, 'mapping_conflict_variant', "the default variant's external_entity_mappings conflict - product skipped rather than publishing with zero variants")
 	}
+	const variantId = variantMapping.mapping.internalId
+	await resolveIdentity(tx, mode, { sourceSystem: '1c', entityType: 'nomenclature', externalId: idNom, internalId: variantId })
 
+	// Phase 2: read-only computations that don't need the product row to exist.
 	const brandId = product.brandId !== null ? await resolveBrandId(tx, product.brandId) : null
-	const existingProductId = productMapping.outcome === 'existing' ? productMapping.mapping.internalId : null
-	const uniqueSlug = await ensureUniqueSlug(tx, slug, externalId, existingProductId)
-	const { productId, action } = await writeProductRow(tx, productMapping, candidateProductId, {
-		brandId,
-		slug: uniqueSlug,
-		content,
-		status: brandId === null || product.categoryId === null ? 'draft' : 'active'
-	})
+	const uniqueSlug = await ensureUniqueSlug(tx, slug, externalId, existingProductId, productId, slugLedger)
+	const { linkedCategoryIds } = await writeCategoryLinksPreview(tx, product, dump)
+	const unpublishedForMissingCategory = linkedCategoryIds.length === 0
+	const status: 'draft' | 'active' = brandId === null || unpublishedForMissingCategory ? 'draft' : 'active'
 
-	await writeCategoryLinks(tx, productId, product, dump)
+	// Phase 3: write the product row, then everything with an FK to it.
+	let action: 'created' | 'updated'
+	if (!dryRun) {
+		const written = await writeProductRow(tx, productMapping, candidateProductId, { brandId, slug: uniqueSlug, content, status })
+		action = written.action
+		await persistCategoryLinks(tx, productId, linkedCategoryIds)
+		await writeVariantRow(tx, variantMapping, candidateVariantId, productId, { sku: idNom, nameRu: null, nameRo: null })
+	} else {
+		action = productMapping.outcome === 'created' ? 'created' : 'updated'
+	}
+	const variantIds: string[] = [variantId]
+	const variantIdByMysqlId = new Map<number, string>([[product.id, variantId]])
+	const oneCBarcodes = new Set<string>()
+	if (oneC?.Barcode) oneCBarcodes.add(oneC.Barcode)
+	const barcodesPlanned = await writeBarcodeRows(tx, variantId, product.barcode, oneCBarcodes, dryRun)
 
 	const conflicts: CatalogImportSlugAliasConflict[] = []
 	const legacyUris: { locale: 'ru' | 'ro'; slug: string; source: string; isCanonical: boolean }[] = []
 	if (product.uriRu !== null) legacyUris.push({ locale: 'ru', slug: product.uriRu.trim().toLowerCase(), source: 'legacy_uri_ru', isCanonical: false })
 	if (product.uriRo !== null) legacyUris.push({ locale: 'ro', slug: product.uriRo.trim().toLowerCase(), source: 'legacy_uri_ro', isCanonical: false })
-	await writeSlugAliases(tx, productId, uniqueSlug, legacyUris, conflicts)
+	await writeSlugAliases(tx, productId, uniqueSlug, legacyUris, conflicts, dryRun, slugLedger)
 
-	const candidateVariantId = crypto.randomUUID()
-	const variantMapping = await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'product_variant', externalId, internalId: candidateVariantId })
-	let variantIds: string[] = []
-	let barcodesWritten = 0
-	const variantIdByMysqlId = new Map<number, string>()
-	if (variantMapping.outcome !== 'conflict') {
-		const variantId = await writeVariantRow(tx, variantMapping, candidateVariantId, productId, { sku: idNom, nameRu: null, nameRo: null })
-		await resolveOrCreateMapping(tx, { sourceSystem: '1c', entityType: 'nomenclature', externalId: idNom, internalId: variantId })
-		variantIds = [variantId]
-		variantIdByMysqlId.set(product.id, variantId)
-		const oneCBarcodes = new Set<string>()
-		if (oneC?.Barcode) oneCBarcodes.add(oneC.Barcode)
-		barcodesWritten = await writeBarcodeRows(tx, variantId, product.barcode, oneCBarcodes)
-	}
-
-	const mediaWritten = await writeMediaRows(tx, dump, productId, [product.id], variantIdByMysqlId)
+	const mediaWritten = await writeMediaRows(tx, dump, productId, [product.id], variantIdByMysqlId, dryRun)
 
 	return {
 		kind: 'standalone',
@@ -726,12 +980,12 @@ async function importStandalone(
 		action,
 		productId,
 		variantIds,
-		barcodesWritten,
+		barcodesWritten: barcodesPlanned,
 		mediaRowsWritten: mediaWritten,
 		slugAliasConflicts: conflicts,
 		unpublishedForMissingBrand: brandId === null,
-		unpublishedForMissingCategory: product.categoryId === null,
-		note: `${action} standalone product + default variant (${barcodesWritten} barcode row(s), ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s))`
+		unpublishedForMissingCategory,
+		note: `${dryRun ? 'dry-run: would ' : ''}${action} standalone product + default variant (${barcodesPlanned} barcode row(s) ${dryRun ? 'planned' : 'written'}, ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s))`
 	}
 }
 
@@ -742,28 +996,64 @@ async function resolveBrandId(tx: Tx, legacyBrandId: number): Promise<string | n
 	return mapping?.internalId ?? null
 }
 
-/** Same resolve-only posture as resolveBrandId - a broken/missing category reference leaves the product uncategorized (and, by the caller's own status computation, draft) rather than inventing or guessing a category, per the standing Sprint 12A.2 decision. */
-async function writeCategoryLinks(tx: Tx, productId: string, product: LegacyProduct, dump: LegacyCatalogDump): Promise<void> {
+/**
+ * Same resolve-only posture as resolveBrandId - a broken/missing category
+ * reference leaves the product uncategorized rather than inventing or
+ * guessing a category, per the standing Sprint 12A.2 decision (products
+ * 1455/6519/7698: no valid category anywhere, must import uncategorized).
+ *
+ * Returns the V2 category ids actually resolved (in both modes - the
+ * `findMapping` read always runs; only the `productCategories` insert is
+ * gated by `dryRun`), so the CALLER can compute "is this product actually
+ * uncategorized" from real mapping-resolution success. Sprint 12B.2.1 Task
+ * 8/9 fix: the caller previously used `product.categoryId === null` (the
+ * raw LEGACY field being merely absent) to decide `unpublishedForMissingCategory`
+ * and `status`, NOT whether a V2 category mapping actually resolved. A
+ * product whose legacy `categoryId` was a non-null id with NO matching V2
+ * category mapping yet (a real, confirmed Sprint 12A.2 scenario: 3/33
+ * category-broken products, and potentially more once real category
+ * mappings are seeded) would therefore have been marked `status: 'active'`
+ * and `unpublishedForMissingCategory: false` while having ZERO rows in
+ * `product_categories` - a published, uncategorized product. Returning the
+ * resolved id list lets the caller key off `linkedCategoryIds.length === 0`
+ * instead, which is actually true "no category ended up linked."
+ *
+ * Split into a read-only PREVIEW (this function - safe to call before the
+ * product row exists, since it only reads `external_entity_mappings`) and
+ * `persistCategoryLinks` (the actual `product_categories` insert, which has
+ * a hard FK to `products.id` and so must only ever run AFTER the product
+ * row has been written).
+ */
+async function writeCategoryLinksPreview(tx: Tx, product: LegacyProduct, dump: LegacyCatalogDump): Promise<{ linkedCategoryIds: string[] }> {
 	const { findMapping } = await import('./mappings')
 	const candidateCategoryIds = new Set<number>()
 	if (product.categoryId !== null) candidateCategoryIds.add(product.categoryId)
 	for (const pc of dump.productCategories) {
 		if (pc.productId === product.id) candidateCategoryIds.add(pc.categoryId)
 	}
+	const linkedCategoryIds: string[] = []
 	for (const legacyCategoryId of candidateCategoryIds) {
 		const mapping = await findMapping(tx, 'legacy_mysql', 'category', String(legacyCategoryId))
 		if (!mapping) continue
+		linkedCategoryIds.push(mapping.internalId)
+	}
+	return { linkedCategoryIds }
+}
+
+/** The actual `product_categories` insert - write-mode only, always called AFTER the product row exists. */
+async function persistCategoryLinks(tx: Tx, productId: string, linkedCategoryIds: string[]): Promise<void> {
+	for (const categoryId of linkedCategoryIds) {
 		const [existing] = await tx
 			.select()
 			.from(productCategories)
-			.where(and(eq(productCategories.productId, productId), eq(productCategories.categoryId, mapping.internalId)))
+			.where(and(eq(productCategories.productId, productId), eq(productCategories.categoryId, categoryId)))
 			.limit(1)
 		if (existing) continue
-		await tx.insert(productCategories).values({ productId, categoryId: mapping.internalId })
+		await tx.insert(productCategories).values({ productId, categoryId })
 	}
 }
 
-function buildResult(units: CatalogImportUnitOutcome[], mode: CatalogImportMode): CatalogImportResult {
+function buildResult(units: CatalogImportUnitOutcome[], mode: CatalogImportMode, quarantinedPositionsTotal: number): CatalogImportResult {
 	const bySkipReason: Record<CatalogImportSkipReason, number> = {
 		ambiguous_family: 0,
 		collision_risk_family: 0,
@@ -801,6 +1091,7 @@ function buildResult(units: CatalogImportUnitOutcome[], mode: CatalogImportMode)
 			unpublishedForMissingBrand,
 			slugAliasConflicts: allSlugConflicts.length,
 			mediaRowsWritten,
+			quarantinedPositionsTotal,
 			examples: {
 				created: created.slice(0, EXAMPLE_LIMIT).map(u => ({ key: u.key, productId: u.productId ?? '' })),
 				skipped: skipped.slice(0, EXAMPLE_LIMIT).map(u => ({ key: u.key, reason: u.skipReason as CatalogImportSkipReason })),

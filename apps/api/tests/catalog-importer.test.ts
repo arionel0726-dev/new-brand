@@ -1,17 +1,21 @@
 import { and, eq } from 'drizzle-orm'
+import nodeCrypto from 'node:crypto'
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { db } from '../src/db/client'
 import { products } from '../src/db/schema/products'
 import { productVariants } from '../src/db/schema/product-variants'
 import { productVariantBarcodes } from '../src/db/schema/product-variant-barcodes'
 import { productSlugAliases } from '../src/db/schema/product-slug-aliases'
+import { productCategories } from '../src/db/schema/product-categories'
 import { externalEntityMappings } from '../src/db/schema/external-entity-mappings'
 import {
 	assertSafeImportTarget,
 	runCatalogImport,
 	UnsafeImportTargetError,
+	ZeroVariantProductError,
 	type CatalogImportInput
 } from '../src/import/catalog-importer'
+import { resolveOrCreateMapping } from '../src/import/mappings'
 import type { LegacyCatalogDump, LegacyProduct } from '../src/import/parsers/mysql-catalog'
 import { parseProductsFeed, type ProductsFeedRecord } from '../src/import/parsers/products-feed'
 import { classifyIdNomDuplicates } from '../src/import/reconcile/duplicate-id-nom'
@@ -230,9 +234,17 @@ describe('group-code collisions - ambiguous family, never auto-merged', () => {
 		expect(family?.collisionRisk).toBe(true)
 
 		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
-		const unit = result.units.find(u => u.key === 'Z99.COLLIDE')
-		expect(unit?.action).toBe('skipped')
-		expect(unit?.skipReason).toBe('collision_risk_family')
+		// Sprint 12B.2.1 Task 6: an unresolved family no longer collapses into
+		// ONE lumped unit - each member gets its own unit (key
+		// `${normalizedCode}:${memberId}`) carrying its own true
+		// position-level status, so a quarantined member hiding inside an
+		// otherwise-ambiguous family is never silently absorbed and lost.
+		const memberUnits = result.units.filter(u => u.key.startsWith('Z99.COLLIDE:'))
+		expect(memberUnits).toHaveLength(2)
+		for (const unit of memberUnits) {
+			expect(unit.action).toBe('skipped')
+			expect(['collision_risk_family', 'ambiguous_family', 'unmatched_family', 'quarantine', 'ambiguous_position']).toContain(unit.skipReason ?? '')
+		}
 
 		const productRows = await db.select().from(products)
 		expect(productRows).toHaveLength(0)
@@ -393,5 +405,205 @@ describe('zero writes in dry-run mode', () => {
 
 		const productRows = await db.select().from(products)
 		expect(productRows).toHaveLength(0)
+	})
+})
+
+/**
+ * Sprint 12B.2.1 regression coverage - these tests exist specifically
+ * because the user ran the real Sprint 12B.2 CLI once against real data and
+ * reported summary numbers (variantsWritten=16 against 5972
+ * productsCreated, barcodesWritten=0, zero alias conflicts, zero
+ * unpublished products, quarantine 374 vs. a previously-reported 403) that,
+ * on code-level investigation, turned out to be real bugs - a dry-run that
+ * never ran most of its own validation/planning logic, and (found while
+ * fixing the dry-run gap) a write-mode variant-identity bug severe enough
+ * to break idempotency and the "every Product has a variant" invariant on
+ * any SECOND run of the importer. Each test below pins the specific
+ * behavior that was broken.
+ */
+describe('Sprint 12B.2.1: dry-run is now a faithful preview, not a product-mapping-only stub', () => {
+	test('a dry-run over a mixed family + standalone fixture set reports a non-zero variantsWritten for EACH kind, not just family-matched units', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 2101, sku: 'F10.ONE', guid: '210101', barcode: '2101010101010', titleRu: 'Family Item A' }),
+			makeLegacyProduct({ id: 2102, sku: 'F10.ONE', guid: '210102', barcode: '2101010101011' }),
+			makeLegacyProduct({ id: 2103, guid: '210103', titleRu: 'Standalone Item' })
+		])
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '210101', VariativeNomenclature: 'F10.ONE', Barcode: '2101010101010' }),
+			makeOneCRaw({ ID_nom: '210102', VariativeNomenclature: 'F10.ONE', Barcode: '2101010101011' }),
+			makeOneCRaw({ ID_nom: '210103' })
+		]
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'dry-run'))
+		const standaloneUnit = result.units.find(u => u.kind === 'standalone' && u.action === 'created')
+		const familyUnit = result.units.find(u => u.kind === 'family' && u.action === 'created')
+		expect(standaloneUnit).toBeDefined()
+		expect(familyUnit).toBeDefined()
+
+		// Before the fix: the standalone dry-run branch never set `variantIds`
+		// at all, so it contributed 0 to `variantsWritten` regardless of how
+		// many standalone products were planned - only family-matched units
+		// (the minority in real data) counted.
+		expect(standaloneUnit?.variantIds).toHaveLength(1)
+		expect(familyUnit?.variantIds).toHaveLength(2)
+		expect(result.summary.variantsWritten).toBe(3) // 1 standalone + 2 family, both kinds counted
+
+		// Confirms the dry-run preview matches what a real write-mode run of
+		// the SAME input would actually produce.
+		const writeResult = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		expect(writeResult.summary.variantsWritten).toBe(result.summary.variantsWritten)
+		expect(writeResult.summary.productsCreated).toBe(result.summary.productsCreated)
+	})
+
+	test('a dry-run plans the correct barcode count for both standalone and multi-barcode family variants - not unconditionally 0', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 2201, guid: '220001', barcode: '2200000000001', titleRu: 'Dry Run Barcode Item' })])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '220001', Barcode: '2200000000002' })] // distinct from the MySQL-side barcode -> 2 planned rows
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'dry-run'))
+		expect(result.summary.barcodesWritten).toBe(2) // MySQL barcode (primary) + the distinct 1C barcode
+
+		const barcodeRows = await db.select().from(productVariantBarcodes)
+		expect(barcodeRows).toHaveLength(0) // still a dry-run - nothing was actually written
+	})
+
+	test('dry-run alias-conflict detection actually runs: a real slug collision is reported with zero writes, not silently reported as zero conflicts', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 2301, guid: '230001', titleRu: 'Collider A', uriRu: 'collide-slug' }),
+			makeLegacyProduct({ id: 2302, guid: '230002', titleRu: 'Collider B', uriRu: 'collide-slug' })
+		])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '230001' }), makeOneCRaw({ ID_nom: '230002' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'dry-run'))
+		// Before the fix: both import paths' dry-run branches returned before
+		// writeSlugAliases was ever called, so this was unconditionally 0 in
+		// every dry-run regardless of real collisions in the data.
+		expect(result.summary.slugAliasConflicts).toBeGreaterThan(0)
+
+		const aliasRows = await db.select().from(productSlugAliases)
+		expect(aliasRows).toHaveLength(0) // still zero writes
+	})
+
+	test('dry-run correctly reports unpublishedForMissingCategory when the legacy category id has no V2 mapping yet - not just when it is null', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 2401, guid: '240001', titleRu: 'No Category Mapping Item', categoryId: 9999 })]) // non-null legacy id, but no mapping seeded anywhere
+		const oneCRaw = [makeOneCRaw({ ID_nom: '240001' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'dry-run'))
+		// Before the fix: this was keyed off `product.categoryId === null`
+		// (false here, since 9999 is non-null) rather than off whether a V2
+		// mapping for category 9999 actually resolved (it doesn't - none was
+		// seeded), so this product would have been silently counted as
+		// correctly categorized and `status: 'active'` with zero real links.
+		expect(result.summary.unpublishedForMissingCategory).toBe(1)
+
+		const categoryRows = await db.select().from(productCategories)
+		expect(categoryRows).toHaveLength(0)
+	})
+})
+
+describe('Sprint 12B.2.1: variant-identity idempotency fix (Task 4 / Task 16)', () => {
+	test('a multi-variant family re-run reuses the SAME variant UUIDs on the second pass, instead of every variant falsely conflicting', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 2501, sku: 'I10.FAM', guid: '250101', barcode: '2501010101010', titleRu: 'Idempotent Family Item' }),
+			makeLegacyProduct({ id: 2502, sku: 'I10.FAM', guid: '250102', barcode: '2501010101011' })
+		])
+		const oneCRaw = [
+			makeOneCRaw({ ID_nom: '250101', VariativeNomenclature: 'I10.FAM', Barcode: '2501010101010' }),
+			makeOneCRaw({ ID_nom: '250102', VariativeNomenclature: 'I10.FAM', Barcode: '2501010101011' })
+		]
+
+		const firstInput = await buildInput(dump, oneCRaw)
+		const first = await db.transaction(tx => runCatalogImport(tx, firstInput, 'write'))
+		const firstUnit = first.units.find(u => u.kind === 'family' && u.action === 'created')!
+		expect(firstUnit.variantIds).toHaveLength(2) // sanity: the first run genuinely wrote 2 variants
+
+		// Before the fix: writeVariantRow's identity resolution used a bare
+		// resolveOrCreateMapping call with a FRESH crypto.randomUUID() every
+		// run, so on this second run EVERY variant's mapping lookup would
+		// find the real stored mapping from run 1 under a DIFFERENT
+		// (freshly-random) internalId and report `{outcome:'conflict'}` -
+		// silently producing a Product with ZERO variants on every re-run.
+		const secondInput = await buildInput(dump, oneCRaw)
+		const second = await db.transaction(tx => runCatalogImport(tx, secondInput, 'write'))
+		const secondUnit = second.units.find(u => u.kind === 'family' && u.key === firstUnit.key)!
+
+		expect(secondUnit.action).toBe('updated')
+		expect(secondUnit.variantIds).toHaveLength(2) // NOT zero - the invariant this sprint set out to guarantee
+		expect(new Set(secondUnit.variantIds)).toEqual(new Set(firstUnit.variantIds)) // same UUIDs reused, not new ones
+
+		const variantRows = await db.select().from(productVariants).where(eq(productVariants.productId, firstUnit.productId!))
+		expect(variantRows).toHaveLength(2) // no duplicate rows either
+	})
+
+	test('every planned Product has at least one planned ProductVariant: a family where every member genuinely conflicts is aborted, never published with zero variants', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 2601, sku: 'C10.FAM', guid: '260101', titleRu: 'Pre-conflicted Family Item' })])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '260101', VariativeNomenclature: 'C10.FAM' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		// resolveIdentity (catalog-importer.ts's own identity-resolution
+		// wrapper, used for every mapping since the Task 16 idempotency fix)
+		// always looks up any EXISTING mapping for an external id first and
+		// reuses its internalId - so a conflict can no longer be forced just
+		// by pre-seeding a mapping under a DIFFERENT external id. The only
+		// remaining real conflict path is `resolveOrCreateMapping`'s
+		// 'internal_id_has_other_external_id' branch: the freshly-generated
+		// candidate UUID for THIS variant happens to already be in use by a
+		// DIFFERENT external id. That branch is only reachable deterministically
+		// in a test by pinning `crypto.randomUUID()` (node:crypto - the same
+		// module instance catalog-importer.ts itself imports) to a fixed
+		// value and pre-claiming that exact value under an unrelated external id.
+		const FIXED_UUID = '11111111-1111-4111-8111-111111111111'
+		const originalRandomUUID = nodeCrypto.randomUUID
+		nodeCrypto.randomUUID = (() => FIXED_UUID) as typeof nodeCrypto.randomUUID
+		try {
+			await db.transaction(async tx => {
+				await resolveOrCreateMapping(tx, { sourceSystem: 'legacy_mysql', entityType: 'product_variant', externalId: 'unrelated-external-id', internalId: FIXED_UUID })
+			})
+
+			await expect(db.transaction(tx => runCatalogImport(tx, input, 'write'))).rejects.toThrow(ZeroVariantProductError)
+		} finally {
+			nodeCrypto.randomUUID = originalRandomUUID
+		}
+
+		// The whole transaction rolled back - no orphan/variant-less product was left behind.
+		const productRows = await db.select().from(products)
+		expect(productRows).toHaveLength(0)
+	})
+})
+
+describe('Sprint 12B.2.1 Task 6: true quarantine population is never hidden inside an unresolved family', () => {
+	test('a quarantined member of an otherwise-ambiguous family is individually surfaced, and quarantinedPositionsTotal matches bySkipReason.quarantine', async () => {
+		const dump = makeDump([
+			makeLegacyProduct({ id: 2701, sku: 'Q10.FAM', guid: null, barcode: null }), // ambiguous group-code member, no corroborating evidence
+			makeLegacyProduct({ id: 2702, sku: 'Q10.FAM', guid: null, barcode: null, titleRu: 'Quarantined Sibling' }) // same ambiguous group, ALSO individually quarantined
+		])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '270101', VariativeNomenclature: 'Q10.FAM' }), makeOneCRaw({ ID_nom: '270102', VariativeNomenclature: 'Q10.FAM' })]
+		const priorQuarantine = new Map<number, ('duplicate_guid' | 'invalid_brand_reference' | 'duplicate_sku')[]>([[2702, ['duplicate_sku']]])
+		const input = await buildInputWithQuarantine(dump, oneCRaw, priorQuarantine)
+
+		const family = input.families.families.find(f => f.normalizedCode === 'Q10.FAM')
+		expect(family?.outcome).not.toBe('confirmed_family') // stays unresolved at the family level
+
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+
+		// Before the fix: product 2702's individual quarantine status was
+		// invisible - the whole family collapsed into ONE lumped
+		// `ambiguous_family`/`collision_risk_family` unit, and
+		// `bySkipReason.quarantine` never incremented for it at all.
+		const memberUnit = result.units.find(u => u.key === 'Q10.FAM:2702')
+		expect(memberUnit?.skipReason).toBe('quarantine')
+		expect(result.summary.bySkipReason.quarantine).toBeGreaterThanOrEqual(1)
+
+		// The TRUE total, read directly from the position-level reconciliation
+		// independent of this importer's own unit-bucketing, must never be
+		// LESS than what bySkipReason individually surfaces (the whole point
+		// of this fix is that the two now agree).
+		expect(result.summary.quarantinedPositionsTotal).toBeGreaterThanOrEqual(result.summary.bySkipReason.quarantine)
+
+		const productRows = await db.select().from(products)
+		expect(productRows).toHaveLength(0) // neither member of this family was ever published
 	})
 })

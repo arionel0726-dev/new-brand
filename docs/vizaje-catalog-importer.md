@@ -92,7 +92,7 @@ Before requesting that authorization, these should hold:
    confirmed — a real test import's products will have no price and no
    stock, by design, and that must be the expected result, not a surprise.
 
-## Verification (this sprint)
+## Verification (Sprint 12B.2)
 
 - `bunx tsc --noEmit`: clean.
 - `bunx drizzle-kit check`: no drift (this sprint writes into Sprint
@@ -100,3 +100,128 @@ Before requesting that authorization, these should hold:
 - Full suite sequential (`bun test --parallel=1`), isolated `beauty_store_test`:
   **474 passed / 0 failed / 15 skipped** (16 new tests, 0 regressions from
   the 458/0/15 Sprint 12B.1 baseline).
+
+## Sprint 12B.2.1 — real dry-run audit and fixes
+
+The user ran the CLI in dry-run mode against real local files on their own
+Mac and reported: `totalUnits: 6976`, `productsCreated: 5972`,
+`unitsSkipped: 1004`, `variantsWritten: 16`, `barcodesWritten: 0`,
+`quarantine: 374` (vs. an earlier-reported `403`), zero `slugAliasConflicts`,
+zero `unpublishedFor*`. Code-level investigation (no access to the real
+files — this was pure code tracing plus synthetic reproduction) found
+several real bugs, all now fixed:
+
+1. **Dry-run was not a faithful preview.** Both `importFamily` and
+   `importStandalone` returned early, before computing brand/category
+   resolution, slug-collision detection, or barcode planning, for EVERY
+   unit in dry-run mode. `variantsWritten=16` reflected only
+   family-matched units (the minority of real data); standalone units
+   never set `variantIds` at all. `barcodesWritten=0` and
+   `slugAliasConflicts=0` were unconditional in every dry-run, not
+   evidence the real data had none. **Fixed**: dry-run and write mode now
+   run the identical code path end to end; every mutating `insert`/
+   `update` is gated by a `dryRun` flag deep inside the `write*` helpers,
+   not by an early return. A dry-run's `variantsWritten`/`barcodesWritten`/
+   `slugAliasConflicts`/`unpublishedFor*` are therefore now a faithful
+   preview of what write mode would actually do.
+2. **A real write-mode foreign-key bug**, found while fixing (1): moving
+   variant/category/alias writes ahead of the product-row write (to check
+   the zero-variant invariant below before committing to a product)
+   broke every write-mode import outright, since `product_variants`,
+   `product_categories`, and `product_variant_barcodes` all have a hard FK
+   to `products.id`. Fixed by splitting each write into a **read-only
+   identity/mapping resolution phase** (safe before the product row
+   exists — `external_entity_mappings` has no FK to catalog tables) and a
+   **persistence phase** that only runs after the product row is written.
+3. **A real, severe idempotency bug**: variant-identity resolution
+   (`product_variants` and the paired `1c`/`nomenclature` mapping) used a
+   bare `resolveOrCreateMapping` call with a freshly-generated
+   `crypto.randomUUID()` on every call, instead of the `resolveIdentity`
+   wrapper products already used. On any SECOND run of the importer over
+   the same confirmed family/standalone position, every variant's mapping
+   lookup found the real stored mapping from run 1 under a *different*
+   (freshly random) candidate id and reported `{outcome:'conflict'}` —
+   silently producing a Product with **zero variants** on every re-run.
+   Fixed by routing all variant-identity resolution through
+   `resolveIdentity`, exactly like product identity already was.
+4. **Invariant added**: every planned Product now has at least one
+   planned ProductVariant, enforced in code, not just by convention. If
+   every confirmed member's variant mapping genuinely conflicts (a real
+   external-identity collision, not the bug in (3)), the whole unit is
+   aborted — `ZeroVariantProductError` in write mode (rolls back the
+   transaction), a skip in dry-run — rather than ever publishing a
+   variant-less product.
+5. **`unpublishedForMissingCategory` was keyed off the wrong signal**: the
+   raw legacy `categoryId` being non-null, not whether a V2 category
+   mapping actually resolved. A product whose legacy category id had no
+   matching V2 mapping yet (a real, confirmed Sprint 12A.2 scenario) would
+   have been silently marked `active` with zero real `product_categories`
+   rows. Fixed: `writeCategoryLinksPreview`/`persistCategoryLinks` now
+   return the actually-resolved V2 category ids, and `unpublishedForMissingCategory`
+   is keyed off `linkedCategoryIds.length === 0`.
+6. **Quarantine undercount explained and fixed**: an unresolved family
+   (`ambiguous_family`/`unmatched_family`/`collision_risk_family`) used to
+   collapse ALL of its members into one lumped skip unit, carrying only
+   the family's own outcome — so a member independently quarantined by
+   the Sprint 12A.2 catalog dry-run was invisible in `bySkipReason.quarantine`
+   whenever its family also happened to be unresolved. This is the
+   code-grounded explanation for `374` vs. the earlier `403`: the two were
+   never measuring the same population. Fixed: each member of an
+   unresolved family now gets its own unit, carrying its own true
+   position-level status (quarantine takes priority, exactly as the
+   underlying reconciliation already decides it). A new summary field,
+   `quarantinedPositionsTotal`, reads the TRUE total directly from
+   `reconcileSqlWith1c`'s own per-product summary, independent of this
+   importer's unit-bucketing, as a standing cross-check against
+   `bySkipReason.quarantine`.
+7. **Dry-run cross-unit slug-collision detection gap**: within one
+   dry-run pass, no row is ever persisted, so a second unit's slug-collision
+   check could never see the first unit's "would-be" slug via a DB read —
+   two sibling products sharing a colliding legacy URI reported zero
+   conflicts in dry-run even though write mode would correctly flag one.
+   Fixed with an in-memory `DryRunSlugLedger` (canonical slugs + aliases,
+   keyed by product id) that `ensureUniqueSlug`/`writeSlugAliases` consult
+   and update for the duration of one dry-run call, so later units see
+   earlier ones' claims exactly as write mode's DB-visible state would.
+
+### Corrected summary shape
+
+`CatalogImportSummary` is unchanged in its field names (so earlier
+real-run numbers remain comparable), but every count's semantics are now
+precisely documented inline in `catalog-importer.ts` and genuinely dual-mode
+(preview in dry-run, actual in write):
+
+- `totalUnits` / `productsCreated` / `productsUpdated` / `unitsSkipped` /
+  `bySkipReason` — one unit per confirmed family, one unit per member of an
+  *unresolved* family (new in 12B.2.1 — see fix 6), one unit per standalone
+  legacy product.
+- `variantsWritten` — sum of planned/written variants across **every**
+  created/updated unit, family-derived and standalone-default both (fix 1).
+- `barcodesWritten` — sum of planned/written `product_variant_barcodes`
+  rows, real in both modes now (fix 1).
+- `unpublishedForMissingCategory` / `unpublishedForMissingBrand` — keyed
+  off actually-resolved V2 mappings, not raw legacy field nullness (fix 5).
+- `slugAliasConflicts` — real cross-unit detection in both modes (fix 1, 7).
+- `quarantinedPositionsTotal` — new field (fix 6): the true total
+  quarantine population, independent of unit-bucketing.
+
+### Updated readiness criteria
+
+In addition to the five criteria above, a future real test import should
+also confirm:
+
+6. The post-12B.2.1 dry-run numbers look structurally different from the
+   pre-fix run described here — in particular `variantsWritten` and
+   `barcodesWritten` should now scale with `productsCreated` rather than
+   sitting near zero, and `quarantinedPositionsTotal` should equal (not
+   exceed) `bySkipReason.quarantine`. A fresh run that still shows the old
+   pattern means the fix did not actually take effect against the real
+   data shape and must be investigated before proceeding.
+
+### Verification (Sprint 12B.2.1)
+
+- `bunx tsc --noEmit`: clean.
+- `bunx drizzle-kit check`: no drift (counter/logic fixes only, no schema change).
+- Full suite sequential (`bun test --parallel=1`), isolated `beauty_store_test`:
+  **481 passed / 0 failed / 15 skipped** (7 new regression tests, 0
+  regressions from the 474/0/15 Sprint 12B.2 baseline).
