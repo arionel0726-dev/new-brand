@@ -13,6 +13,7 @@
     "import:legacy:reconcile-1c-local": "bun run src/import/cli/reconcile-1c-local.ts",
     "import:legacy:catalog-import": "bun run src/import/cli/catalog-import.ts",
     "import:legacy:brand-category-bootstrap": "bun run src/import/cli/brand-category-bootstrap.ts",
+    "import:legacy:variant-parity-local": "bun run src/import/cli/variant-parity-local.ts",
     "test": "bun test"
   },
   "dependencies": {
