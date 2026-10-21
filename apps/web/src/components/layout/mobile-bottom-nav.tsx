@@ -14,7 +14,7 @@ type MobileBottomNavProps = {
 }
 
 type NavItem = {
-	key: 'search' | 'wishlist' | 'home' | 'account' | 'cart'
+	key: 'search' | 'wishlist' | 'home' | 'account' | 'categories'
 	href: string
 	label: string
 	icon?: LucideIcon
@@ -27,7 +27,7 @@ export function MobileBottomNav({ locale, dict }: MobileBottomNavProps) {
 		{ key: 'wishlist', href: `/${locale}/wishlist`, label: dict.nav.wishlist, icon: Heart },
 		{ key: 'home', href: `/${locale}`, label: dict.brand.name },
 		{ key: 'account', href: `/${locale}/account`, label: dict.nav.account, icon: UserCircle },
-		{ key: 'cart', href: `/${locale}/cart`, label: dict.nav.cart, icon: ShoppingBag }
+		{ key: 'categories', href: `/${locale}/categories`, label: dict.nav.categories, icon: ShoppingBag }
 	]
 
 	return (
