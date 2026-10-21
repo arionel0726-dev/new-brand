@@ -15,6 +15,13 @@ producing this document.
 This extends, and must be read alongside:
 - `docs/vizaje-sql-1c-reconciliation.md` (Sprint 12A.3, commit `cf18d57d`) —
   the reconciliation tool this plan's §5 builds on.
+- `docs/vizaje-identity-architecture.md` (Sprint 12B.0) — the identity
+  model, migration rules, proposed (not applied) schema changes, unresolved
+  price/inventory contracts, and the Phase B readiness plan, grounded in a
+  forensic static-code audit of the real legacy CodeIgniter 3 importer.
+  That document is the authoritative home for anything touching schema or
+  migration rules going forward; this plan stays focused on the
+  reconciliation *tooling's* behavior and findings.
 - `docs/vizaje-catalog-migration-report.md` §13 (Sprint 12A.2) — the
   forensic findings on the real MySQL export this plan cross-references.
 
