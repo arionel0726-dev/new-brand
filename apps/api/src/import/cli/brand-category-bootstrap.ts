@@ -21,6 +21,7 @@ import { env } from '../../config/env'
 import { loadLegacyCatalogDump } from '../parsers/mysql-catalog'
 import { assertSafeImportTarget, UnsafeImportTargetError } from '../catalog-importer'
 import { bootstrapBrands, bootstrapCategories } from '../brand-category-bootstrap'
+import { formatSkippedUnits } from '../format-bootstrap-report'
 
 type Args = { sql: string | null; write: boolean }
 
@@ -34,6 +35,17 @@ function parseArgs(argv: string[]): Args {
 }
 
 const USAGE = 'Usage: bun run import:legacy:brand-category-bootstrap -- --sql=<path> [--write]'
+
+/**
+ * Sprint 12B.3.1 follow-up: the summary JSON only carries counts
+ * (`93/94 planned`, `1 empty_title`) - it never names which legacy row was
+ * skipped or why, even though bootstrapBrands/bootstrapCategories already
+ * compute exactly that per-unit detail. Formatting itself lives in the pure,
+ * testable format-bootstrap-report.ts; this is just the print step.
+ */
+function printSkippedUnits(label: string, units: Parameters<typeof formatSkippedUnits>[1]) {
+	console.log(`\n${formatSkippedUnits(label, units).join('\n')}`)
+}
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2))
@@ -94,6 +106,9 @@ async function main() {
 	console.log(JSON.stringify(result.brandResult.summary, null, 2))
 	console.log('\n=== Category bootstrap summary ===')
 	console.log(JSON.stringify(result.categoryResult.summary, null, 2))
+
+	printSkippedUnits('brands', result.brandResult.units)
+	printSkippedUnits('categories', result.categoryResult.units)
 
 	if (mode === 'dry-run') {
 		console.log(
