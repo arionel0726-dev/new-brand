@@ -109,7 +109,11 @@ import type { ProductsFeedRecord } from './parsers/products-feed'
 import type { FamilyReconciliationResult, FamilyMatch, FamilyPositionResult } from './reconcile/family-reconciliation'
 import type { ReconciliationResult } from './reconcile/sql-1c-reconciliation'
 import type { IdNomDuplicateReport, IdNomDuplicateGroup } from './reconcile/duplicate-id-nom'
-import { reconcileLegacyVariantFamilies, type LegacyVariantFamily } from './reconcile/legacy-variant-family-reconciliation'
+import {
+	reconcileLegacyVariantFamilies,
+	type LegacyVariantFamily,
+	type LegacyVariantFamilyClassification
+} from './reconcile/legacy-variant-family-reconciliation'
 import type { QuarantineReasonCode } from './dry-run-catalog'
 
 export type CatalogImportMode = 'dry-run' | 'write'
@@ -149,6 +153,17 @@ export type CatalogImportUnitOutcome = {
 	unpublishedForMissingCategory?: boolean
 	/** Additional validation (Sprint 12B.4): a multi-member family where a non-main member's own category links resolve to a different V2 category set than the main position's. Reported, never auto-resolved - the main position's links are still what's actually written. Always `false`/absent for a standalone unit (nothing to disagree with). */
 	categoryLinkConflict?: boolean
+	/**
+	 * Sprint 12B.6.1 Task 6: the full `legacyProductId -> 1C ID_nom -> V2 variantId`
+	 * chain for every confirmed variant this unit wrote (or would write), so a
+	 * preview can show exactly which legacy row and which 1C identity each V2
+	 * variant traces back to, without re-deriving anything - these are the
+	 * exact ids this function already resolved above. Absent on a skipped unit
+	 * (nothing was resolved to report).
+	 */
+	variantIdentities?: { legacyProductId: number; idNom: string; variantId: string }[]
+	/** Only set for `kind: 'legacy_variant_family'` units: the Pass 0 reconstruction classification (`confirmed`/`partial`/`quarantined`) this unit's family was given by `reconcileLegacyVariantFamilies`, so a preview can report confirmed/partial/quarantined family counts without re-deriving them. */
+	legacyVariantFamilyClassification?: LegacyVariantFamilyClassification
 	note: string
 }
 
@@ -785,7 +800,7 @@ export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: 
 
 		const key = `legacy-variant-family-${family.legacyProductId}`
 		if (family.classification === 'quarantined') {
-			units.push(skipUnit('legacy_variant_family', key, 'quarantine', family.reasoning))
+			units.push({ ...skipUnit('legacy_variant_family', key, 'quarantine', family.reasoning), legacyVariantFamilyClassification: family.classification })
 			continue
 		}
 
@@ -795,7 +810,10 @@ export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: 
 			// product_id that doesn't resolve to a parsed parent row - guarded
 			// here too so a parent is never fabricated even if that invariant
 			// were ever violated upstream.
-			units.push(skipUnit('legacy_variant_family', key, 'unmatched_position', 'parent legacy product row not found for this product_id hypothesis - never fabricated'))
+			units.push({
+				...skipUnit('legacy_variant_family', key, 'unmatched_position', 'parent legacy product row not found for this product_id hypothesis - never fabricated'),
+				legacyVariantFamilyClassification: family.classification
+			})
 			continue
 		}
 
@@ -1175,6 +1193,7 @@ async function importFamily(
 		unpublishedForMissingBrand: brandId === null,
 		unpublishedForMissingCategory,
 		categoryLinkConflict,
+		variantIdentities: resolved.map(r => ({ legacyProductId: r.member.id, idNom: r.idNom, variantId: r.variantId })),
 		note: `${dryRun ? 'dry-run: would ' : ''}${action} family product (${variantIds.length} variant(s), ${barcodesPlanned} barcode row(s) ${dryRun ? 'planned' : 'written'}, ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s)${categoryLinkConflict ? ', category link conflict between family members' : ''}${legacyHidden ? ', legacy-hidden' : ''})`
 	}
 }
@@ -1356,6 +1375,8 @@ async function importLegacyVariantFamily(
 		slugAliasConflicts: conflicts,
 		unpublishedForMissingBrand: brandId === null,
 		unpublishedForMissingCategory,
+		variantIdentities: resolved.map(r => ({ legacyProductId: family.legacyProductId, idNom: r.member.idNom, variantId: r.variantId })),
+		legacyVariantFamilyClassification: family.classification,
 		note: `${dryRun ? 'dry-run: would ' : ''}${action} reconstructed product_id family (classification=${family.classification}, ${variantIds.length}/${totalMembers} products_variable rows confirmed, ${barcodesPlanned} barcode row(s) ${dryRun ? 'planned' : 'written'}, ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s)${legacyHidden ? ', legacy-hidden' : ''})`
 	}
 }
@@ -1488,6 +1509,7 @@ async function importStandalone(
 		slugAliasConflicts: conflicts,
 		unpublishedForMissingBrand: brandId === null,
 		unpublishedForMissingCategory,
+		variantIdentities: [{ legacyProductId: product.id, idNom, variantId }],
 		note: `${dryRun ? 'dry-run: would ' : ''}${action} standalone product + default variant (${barcodesPlanned} barcode row(s) ${dryRun ? 'planned' : 'written'}, ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s)${legacyHidden ? ', legacy-hidden' : ''})`
 	}
 }

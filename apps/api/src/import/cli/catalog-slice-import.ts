@@ -38,14 +38,7 @@ import { buildCatalogSlice, resolveLegacyProductIds, UnknownLegacyProductIdError
 import { autoSelectDiverseSlice } from '../catalog-slice-scenarios'
 import { runInRolledBackTransaction } from '../catalog-slice-rollback'
 import { buildSlicePreview, computeSliceManifestHash, assertSliceConfirmed, SliceConfirmationError } from '../catalog-slice-preview'
-import {
-	checkRowCounts,
-	checkNoOrphanVariants,
-	checkNoDuplicateSkus,
-	checkNoDuplicateExternalIdMappings,
-	checkBarcodeIntegrity,
-	checkCategoryBrandLinksResolve
-} from '../catalog-slice-post-import-checks'
+import { runAtomicSliceWrite, PostImportChecksFailedError } from '../catalog-slice-write'
 import { parseSliceCliArgs } from '../catalog-slice-cli-args'
 
 const USAGE =
@@ -129,7 +122,29 @@ async function main() {
 		throw error
 	}
 
-	const manifestHash = computeSliceManifestHash(legacyProductIds)
+	const positions = reconcileSqlWith1c(slicedDump, oneCRecords, priorQuarantine)
+	const legacyVariantFamilies = reconcileLegacyVariantFamilies(slicedDump, oneCRecords, priorQuarantine)
+
+	// Sprint 12B.6.1 Task 5: every 1C ID_nom this slice's own reconciliation
+	// (Pass 0 + Pass 1/2) actually resolved against - not the whole 1C feed,
+	// which is almost always far larger than what this slice touches.
+	const relevantIdNoms = [
+		...positions.mysqlResults.flatMap(r => r.matchedOneCIdNoms),
+		...legacyVariantFamilies.families.flatMap(f => f.confirmedMembers.map(m => m.idNom))
+	]
+
+	const manifestInputs = {
+		legacyProductIds,
+		slicedDump,
+		relevantIdNoms,
+		importParams: {
+			auto: args.auto ?? false,
+			legacyProductIds: args.legacyProductIds ? args.legacyProductIds.join(',') : null,
+			brandIds: args.brandIds ? args.brandIds.join(',') : null,
+			legacyCategoryIds: args.legacyCategoryIds ? args.legacyCategoryIds.join(',') : null
+		}
+	}
+	const manifestHash = computeSliceManifestHash(manifestInputs)
 	console.log(
 		`\nSlice: ${slicedDump.products.length} products, ${slicedDump.productVariables.length} variables, ${slicedDump.brands.length} brands, ${slicedDump.categories.length} categories.`
 	)
@@ -139,7 +154,7 @@ async function main() {
 		dump: slicedDump,
 		oneCRecords,
 		families: reconcileFamilies(slicedDump, oneCRecords, priorQuarantine),
-		positions: reconcileSqlWith1c(slicedDump, oneCRecords, priorQuarantine),
+		positions,
 		idNomDuplicates
 	}
 
@@ -156,7 +171,7 @@ async function main() {
 	}
 
 	try {
-		assertSliceConfirmed(legacyProductIds, args.confirmSlice ?? undefined)
+		assertSliceConfirmed(manifestInputs, args.confirmSlice ?? undefined)
 	} catch (error) {
 		if (error instanceof SliceConfirmationError) {
 			console.error(error.message)
@@ -165,30 +180,28 @@ async function main() {
 		throw error
 	}
 
-	const writeResult = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
-	console.log('\n=== Write summary ===')
-	console.log(JSON.stringify(writeResult.summary, null, 2))
-
-	console.log('\n=== Post-import checks ===')
-	const checks = await db.transaction(async tx => {
-		const rowCounts = await checkRowCounts(tx, {
-			products: writeResult.summary.productsCreated + writeResult.summary.productsUpdated,
-			variants: writeResult.summary.variantsWritten
-		})
-		const orphanVariants = await checkNoOrphanVariants(tx)
-		const duplicateSkus = await checkNoDuplicateSkus(tx)
-		const duplicateExternalIdMappings = await checkNoDuplicateExternalIdMappings(tx)
-		const barcodeIntegrity = await checkBarcodeIntegrity(tx)
-		const categoryBrandLinks = await checkCategoryBrandLinksResolve(tx)
-		return { rowCounts, orphanVariants, duplicateSkus, duplicateExternalIdMappings, barcodeIntegrity, categoryBrandLinks }
-	})
-	console.log(JSON.stringify(checks, null, 2))
-	const allOk = Object.values(checks).every(c => c.ok)
-	if (!allOk) {
-		console.error('\nOne or more post-import checks FAILED - see above.')
-		process.exit(1)
+	// Sprint 12B.6.1 Task 1: the write AND every mandatory post-import check
+	// run inside ONE transaction (see `runAtomicSliceWrite`). Postgres never
+	// commits a transaction whose callback throws - so a failing check rolls
+	// back the write it just made, atomically, rather than leaving a
+	// committed-but-invalid import behind for a human to notice and clean up
+	// by hand.
+	try {
+		const { importResult, checks } = await runAtomicSliceWrite(db, input)
+		console.log('\n=== Write summary ===')
+		console.log(JSON.stringify(importResult.summary, null, 2))
+		console.log('\n=== Post-import checks ===')
+		console.log(JSON.stringify(checks, null, 2))
+		console.log('\nAll post-import checks passed. Transaction committed.')
+	} catch (error) {
+		if (error instanceof PostImportChecksFailedError) {
+			console.log('\n=== Post-import checks ===')
+			console.log(JSON.stringify(error.checks, null, 2))
+			console.error(`\n${error.message}`)
+			process.exit(1)
+		}
+		throw error
 	}
-	console.log('\nAll post-import checks passed.')
 }
 
 main()

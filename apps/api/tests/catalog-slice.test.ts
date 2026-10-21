@@ -357,27 +357,68 @@ describe('buildSlicePreview (Requirement 4)', () => {
 	})
 })
 
-describe('computeSliceManifestHash / assertSliceConfirmed (Requirement 5)', () => {
-	test('is deterministic and order-independent', () => {
-		expect(computeSliceManifestHash([3, 1, 2])).toBe(computeSliceManifestHash([1, 2, 3]))
-		expect(computeSliceManifestHash([1, 2, 3])).toBe(computeSliceManifestHash([1, 1, 2, 3]))
+describe('computeSliceManifestHash / assertSliceConfirmed (Requirement 5 / Sprint 12B.6.1 Task 5)', () => {
+	function manifestInputs(overrides: Partial<Parameters<typeof computeSliceManifestHash>[0]> = {}) {
+		return {
+			legacyProductIds: [1, 2, 3],
+			slicedDump: emptyDump({}),
+			relevantIdNoms: ['nom-1', 'nom-2'],
+			importParams: { auto: false, legacyProductIds: '1,2,3', brandIds: null, legacyCategoryIds: null },
+			...overrides
+		}
+	}
+
+	test('is deterministic and order-independent on the legacy id selection', () => {
+		expect(computeSliceManifestHash(manifestInputs({ legacyProductIds: [3, 1, 2] }))).toBe(
+			computeSliceManifestHash(manifestInputs({ legacyProductIds: [1, 2, 3] }))
+		)
+		expect(computeSliceManifestHash(manifestInputs({ legacyProductIds: [1, 2, 3] }))).toBe(
+			computeSliceManifestHash(manifestInputs({ legacyProductIds: [1, 1, 2, 3] }))
+		)
 	})
 
 	test('differs for a different slice selection', () => {
-		expect(computeSliceManifestHash([1, 2, 3])).not.toBe(computeSliceManifestHash([1, 2, 4]))
+		expect(computeSliceManifestHash(manifestInputs({ legacyProductIds: [1, 2, 3] }))).not.toBe(
+			computeSliceManifestHash(manifestInputs({ legacyProductIds: [1, 2, 4] }))
+		)
+	})
+
+	test('Task 5: differs when the sliced dump CONTENT changes, even with the identical legacy id selection', () => {
+		const base = manifestInputs({ slicedDump: emptyDump({ products: [makeLegacyProduct({ id: 1, titleRu: 'Original title' })] }) })
+		const changed = manifestInputs({ slicedDump: emptyDump({ products: [makeLegacyProduct({ id: 1, titleRu: 'Changed title' })] }) })
+		expect(computeSliceManifestHash(base)).not.toBe(computeSliceManifestHash(changed))
+	})
+
+	test('Task 5: differs when the relevant 1C identities change, even with identical ids and dump', () => {
+		const a = manifestInputs({ relevantIdNoms: ['nom-1'] })
+		const b = manifestInputs({ relevantIdNoms: ['nom-1', 'nom-2'] })
+		expect(computeSliceManifestHash(a)).not.toBe(computeSliceManifestHash(b))
+	})
+
+	test('Task 5: differs when import parameters change, even with identical ids, dump, and identities', () => {
+		const a = manifestInputs({ importParams: { auto: false, legacyProductIds: '1,2,3', brandIds: null, legacyCategoryIds: null } })
+		const b = manifestInputs({ importParams: { auto: true, legacyProductIds: null, brandIds: null, legacyCategoryIds: null } })
+		expect(computeSliceManifestHash(a)).not.toBe(computeSliceManifestHash(b))
 	})
 
 	test('refuses (fails closed) with no confirmation hash supplied', () => {
-		expect(() => assertSliceConfirmed([1, 2, 3], undefined)).toThrow(SliceConfirmationError)
+		expect(() => assertSliceConfirmed(manifestInputs(), undefined)).toThrow(SliceConfirmationError)
 	})
 
 	test('refuses when the supplied hash does not match the slice actually being imported', () => {
-		const wrongHash = computeSliceManifestHash([9, 9, 9])
-		expect(() => assertSliceConfirmed([1, 2, 3], wrongHash)).toThrow(SliceConfirmationError)
+		const wrongHash = computeSliceManifestHash(manifestInputs({ legacyProductIds: [9, 9, 9] }))
+		expect(() => assertSliceConfirmed(manifestInputs(), wrongHash)).toThrow(SliceConfirmationError)
+	})
+
+	test('refuses when the input changed after confirmation, even though the legacy id selection stayed identical (Task 5/7)', () => {
+		const confirmedAgainst = manifestInputs({ slicedDump: emptyDump({ products: [makeLegacyProduct({ id: 1, titleRu: 'Reviewed version' })] }) })
+		const staleHash = computeSliceManifestHash(confirmedAgainst)
+		const actuallyImporting = manifestInputs({ slicedDump: emptyDump({ products: [makeLegacyProduct({ id: 1, titleRu: 'Mutated after review' })] }) })
+		expect(() => assertSliceConfirmed(actuallyImporting, staleHash)).toThrow(SliceConfirmationError)
 	})
 
 	test('succeeds only when the supplied hash exactly matches this slice', () => {
-		const correctHash = computeSliceManifestHash([1, 2, 3])
-		expect(() => assertSliceConfirmed([1, 2, 3], correctHash)).not.toThrow()
+		const correctHash = computeSliceManifestHash(manifestInputs())
+		expect(() => assertSliceConfirmed(manifestInputs(), correctHash)).not.toThrow()
 	})
 })

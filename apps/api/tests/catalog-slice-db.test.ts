@@ -20,7 +20,9 @@ import {
 	checkCategoryBrandLinksResolve,
 	checkRepeatRunCreatedNothingNew
 } from '../src/import/catalog-slice-post-import-checks'
-import { runInRolledBackTransaction, resetCatalogTestDatabase, IntentionalRollback } from '../src/import/catalog-slice-rollback'
+import { runInRolledBackTransaction, resetCatalogTestDatabase, IntentionalRollback, UnsafeResetError } from '../src/import/catalog-slice-rollback'
+import { runAtomicSliceWrite, PostImportChecksFailedError } from '../src/import/catalog-slice-write'
+import { collections, collectionProducts } from '../src/db/schema/collections'
 import { resetDatabase } from './helpers'
 
 /** Sprint 12B.6 Requirement 8: synthetic fixtures only. */
@@ -268,5 +270,103 @@ describe('Requirement 7: rollback mechanisms', () => {
 describe('assertSafeImportTarget sanity (reused, unchanged, Sprint 12B.4 Priority 6)', () => {
 	test('still rejects anything but the exact local test database', () => {
 		expect(() => assertSafeImportTarget('postgres://user:pass@remote-host:5432/beauty_store_test')).toThrow(UnsafeImportTargetError)
+	})
+})
+
+describe('Sprint 12B.6.1 Task 1: atomic write + validation (runAtomicSliceWrite)', () => {
+	test('a clean write commits and passes every check', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 950, guid: '95001', titleRu: 'Atomic Source', uriRu: 'atomic-source' })])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '95001' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const { importResult, checks } = await runAtomicSliceWrite(db, input)
+		expect(importResult.summary.productsCreated).toBe(1)
+		expect(Object.values(checks).every(c => c.ok)).toBe(true)
+
+		const written = await db.select().from(products)
+		expect(written).toHaveLength(1)
+	})
+
+	test('a forced post-import check failure proves the entire write was rolled back - queried against real DB state, not a return value', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 951, guid: '95101', titleRu: 'Forced Failure Source', uriRu: 'forced-failure-source' })])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '95101' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		// Replicates runAtomicSliceWrite's exact shape (import + checks in one
+		// transaction, throw on failure) but deliberately corrupts state
+		// between the write and the checks - the only way to FORCE a real
+		// check failure without disabling a guard the import itself relies on.
+		await expect(
+			db.transaction(async tx => {
+				const importResult = await runCatalogImport(tx, input, 'write')
+				expect(importResult.summary.productsCreated).toBe(1)
+				// Deliberate corruption: erase the identity trail a real bug
+				// might leave behind, so checkNoOrphanVariants - one of the
+				// exact checks runAtomicSliceWrite runs - fails.
+				await tx.delete(externalEntityMappings)
+				const orphanCheck = await checkNoOrphanVariants(tx)
+				expect(orphanCheck.ok).toBe(false)
+				throw new PostImportChecksFailedError({
+					rowCounts: { ok: true, issues: [], actual: { products: 1, variants: 1 } },
+					orphanVariants: orphanCheck,
+					duplicateSkus: { ok: true, issues: [] },
+					duplicateExternalIdMappings: { ok: true, issues: [] },
+					barcodeIntegrity: { ok: true, issues: [] },
+					categoryBrandLinks: { ok: true, issues: [] }
+				})
+			})
+		).rejects.toThrow(PostImportChecksFailedError)
+
+		// Queried on a FRESH statement against the real table, outside any
+		// transaction this test controls - proving the product row the
+		// callback above saw (via `importResult.summary.productsCreated`)
+		// never actually survived the transaction's rollback.
+		const afterRollback = await db.select().from(products).where(eq(products.slug, 'forced-failure-source'))
+		expect(afterRollback).toHaveLength(0)
+		const mappingsAfterRollback = await db.select().from(externalEntityMappings)
+		expect(mappingsAfterRollback).toHaveLength(0)
+	})
+
+	test('repeat write via runAtomicSliceWrite creates zero additional products the second time (idempotency)', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 952, guid: '95201', titleRu: 'Repeat Atomic Source', uriRu: 'repeat-atomic-source' })])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '95201' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const first = await runAtomicSliceWrite(db, input)
+		expect(first.importResult.summary.productsCreated).toBe(1)
+		expect(first.importResult.summary.productsUpdated).toBe(0)
+
+		const second = await runAtomicSliceWrite(db, input)
+		expect(second.importResult.summary.productsCreated).toBe(0)
+		expect(second.importResult.summary.productsUpdated).toBe(1)
+		expect(checkRepeatRunCreatedNothingNew(first.importResult.summary.productsCreated, second.importResult.summary.productsCreated).ok).toBe(
+			true
+		)
+
+		const actualRows = await db.select().from(products)
+		expect(actualRows).toHaveLength(1)
+	})
+})
+
+describe('Sprint 12B.6.1 Task 3: resetCatalogTestDatabase refuses an unsafe reset', () => {
+	test('refuses when an out-of-domain table the CASCADE would reach is not empty, and leaves everything untouched', async () => {
+		const dump = makeDump([makeLegacyProduct({ id: 953, guid: '95301', titleRu: 'Reset Guard Source', uriRu: 'reset-guard-source' })])
+		const oneCRaw = [makeOneCRaw({ ID_nom: '95301' })]
+		const input = await buildInput(dump, oneCRaw)
+		await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		const [product] = await db.select().from(products)
+		expect(product).toBeDefined()
+
+		// Seed an out-of-domain table (never part of CATALOG_IMPORT_TABLES)
+		// that references the just-written product - exactly the scenario a
+		// bare `TRUNCATE ... CASCADE` would silently reach into.
+		const [collection] = await db.insert(collections).values({ slug: 'reset-guard-collection', titleRu: 'RU', titleRo: 'RO' }).returning()
+		await db.insert(collectionProducts).values({ collectionId: collection.id, productId: product.id })
+
+		await expect(resetCatalogTestDatabase(db, process.env.DATABASE_URL!)).rejects.toThrow(UnsafeResetError)
+
+		// Nothing was touched - neither the catalog data nor the out-of-domain row.
+		expect(await db.select().from(products)).toHaveLength(1)
+		expect(await db.select().from(collectionProducts)).toHaveLength(1)
 	})
 })
