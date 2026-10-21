@@ -1,0 +1,400 @@
+import { eq } from 'drizzle-orm'
+import { beforeEach, describe, expect, test } from 'bun:test'
+import { db } from '../src/db/client'
+import { brands } from '../src/db/schema/brands'
+import { categories } from '../src/db/schema/categories'
+import { externalEntityMappings } from '../src/db/schema/external-entity-mappings'
+import { products } from '../src/db/schema/products'
+import {
+	bootstrapBrands,
+	bootstrapCategories,
+	countDraftToPublishableCandidates,
+	type BootstrapMode
+} from '../src/import/brand-category-bootstrap'
+import { assertSafeImportTarget, runCatalogImport, type CatalogImportInput } from '../src/import/catalog-importer'
+import { classifyIdNomDuplicates } from '../src/import/reconcile/duplicate-id-nom'
+import { reconcileFamilies } from '../src/import/reconcile/family-reconciliation'
+import { reconcileSqlWith1c } from '../src/import/reconcile/sql-1c-reconciliation'
+import type { LegacyBrand, LegacyCatalogDump, LegacyCategory, LegacyProduct } from '../src/import/parsers/mysql-catalog'
+import { parseProductsFeed } from '../src/import/parsers/products-feed'
+import { resetDatabase } from './helpers'
+
+/** Synthetic fixtures only - every value below is invented for test purposes, never derived from a real legacy record (Sprint 12B.3's explicit restriction). */
+
+function makeBrand(overrides: Partial<LegacyBrand> & { id: number }): LegacyBrand {
+	return {
+		guid: null,
+		title: `Brand ${overrides.id}`,
+		uri: null,
+		textRu: null,
+		textRo: null,
+		seoTitleRu: null,
+		seoTitleRo: null,
+		isShown: true,
+		sortOrder: 0,
+		...overrides
+	}
+}
+
+function makeCategory(overrides: Partial<LegacyCategory> & { id: number }): LegacyCategory {
+	return {
+		guid: null,
+		parentId: 0,
+		titleRu: `Category ${overrides.id}`,
+		titleRo: null,
+		uriRu: null,
+		uriRo: null,
+		descRu: null,
+		descRo: null,
+		seoTitleRu: null,
+		seoTitleRo: null,
+		isShown: true,
+		sortOrder: 0,
+		...overrides
+	}
+}
+
+function makeLegacyProduct(overrides: Partial<LegacyProduct> & { id: number }): LegacyProduct {
+	return {
+		guid: null,
+		sku: null,
+		titleRu: `Product ${overrides.id}`,
+		titleRo: null,
+		descRu: null,
+		descRo: null,
+		textRu: null,
+		textRo: null,
+		uriRu: null,
+		uriRo: null,
+		price: null,
+		discountPrice: null,
+		priceWh: null,
+		volume: null,
+		onStock: null,
+		stock: null,
+		isNew: false,
+		categoryId: null,
+		brandId: null,
+		instructionRu: null,
+		instructionRo: null,
+		componentsRu: null,
+		componentsRo: null,
+		sex: null,
+		seoTitleRu: null,
+		seoTitleRo: null,
+		seoDescRu: null,
+		seoDescRo: null,
+		barcode: null,
+		warehouseName: null,
+		isShown: true,
+		createdAt: null,
+		updatedAt: null,
+		...overrides
+	}
+}
+
+function makeDump(partial: Partial<LegacyCatalogDump>): LegacyCatalogDump {
+	return {
+		products: [],
+		productVariables: [],
+		brands: [],
+		categories: [],
+		productCategories: [],
+		productImgs: [],
+		productVariableImgs: [],
+		stores: [],
+		storeImgs: [],
+		productsMore: [],
+		...partial
+	}
+}
+
+beforeEach(async () => {
+	await resetDatabase()
+})
+
+describe('bootstrapBrands (Requirement 3: RU/RO brand names)', () => {
+	test('legacy single-language title is duplicated into both nameRu and nameRo, never left null or machine-translated', async () => {
+		const result = await db.transaction(tx => bootstrapBrands(tx, [makeBrand({ id: 1, title: 'Anny' })], 'write'))
+		expect(result.summary.created).toBe(1)
+		const [row] = await db.select().from(brands).where(eq(brands.id, result.units[0].internalId as string))
+		expect(row.nameRu).toBe('Anny')
+		expect(row.nameRo).toBe('Anny')
+	})
+
+	test('Requirement 6: empty/missing title is never invented - skipped with reason, no brand row written', async () => {
+		const result = await db.transaction(tx => bootstrapBrands(tx, [makeBrand({ id: 2, title: null })], 'write'))
+		expect(result.summary.skipped).toBe(1)
+		expect(result.summary.bySkipReason.empty_title).toBe(1)
+		const rows = await db.select().from(brands)
+		expect(rows).toHaveLength(0)
+	})
+
+	test('Requirement 8: creates a legacy_mysql/brand external mapping', async () => {
+		const result = await db.transaction(tx => bootstrapBrands(tx, [makeBrand({ id: 3, title: 'Dior' })], 'write'))
+		const [mapping] = await db
+			.select()
+			.from(externalEntityMappings)
+			.where(eq(externalEntityMappings.externalId, '3'))
+		expect(mapping.sourceSystem).toBe('legacy_mysql')
+		expect(mapping.entityType).toBe('brand')
+		expect(mapping.internalId).toBe(result.units[0].internalId as string)
+	})
+})
+
+describe('bootstrapBrands: Requirement 7 + Important-B (duplicate slug conflict reporting)', () => {
+	test('two legacy brands deriving the same slug both get real rows under distinct slugs, and the conflict names BOTH legacy owners', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapBrands(
+				tx,
+				[makeBrand({ id: 10, title: 'Same Name', uri: 'same-name' }), makeBrand({ id: 11, title: 'Same Name', uri: 'same-name' })],
+				'write'
+			)
+		)
+		expect(result.summary.created).toBe(2)
+		expect(result.summary.conflicts).toHaveLength(1)
+		const conflict = result.summary.conflicts[0]
+		expect([conflict.legacyId, conflict.otherLegacyId].sort()).toEqual([10, 11])
+
+		const rows = await db.select().from(brands)
+		const slugs = rows.map(r => r.slug)
+		expect(new Set(slugs).size).toBe(2) // both rows exist under distinct slugs
+		expect(slugs).toContain('same-name') // the first claimant keeps the base slug
+		expect(slugs.some(s => s !== 'same-name')).toBe(true) // the second is suffixed, never silently reassigned onto the first
+
+		// neither owner was dropped or merged into the other
+		const mappings = await db.select().from(externalEntityMappings).where(eq(externalEntityMappings.entityType, 'brand'))
+		expect(mappings.map(m => m.externalId).sort()).toEqual(['10', '11'])
+	})
+})
+
+describe('bootstrapCategories: Requirement 4 (parent-child tree order)', () => {
+	test('a 3-level tree imports with every child pointing at its real resolved V2 parent', async () => {
+		const legacyCategories = [
+			makeCategory({ id: 1, parentId: 0, titleRu: 'Root' }),
+			makeCategory({ id: 2, parentId: 1, titleRu: 'Mid' }),
+			makeCategory({ id: 3, parentId: 2, titleRu: 'Leaf' })
+		]
+		const result = await db.transaction(tx => bootstrapCategories(tx, legacyCategories, 'write'))
+		expect(result.summary.created).toBe(3)
+		expect(result.summary.deferredForUnresolvedParent).toBe(0)
+
+		const rows = await db.select().from(categories)
+		const root = rows.find(r => r.nameRu === 'Root')!
+		const mid = rows.find(r => r.nameRu === 'Mid')!
+		const leaf = rows.find(r => r.nameRu === 'Leaf')!
+		expect(root.parentId).toBeNull()
+		expect(mid.parentId).toBe(root.id)
+		expect(leaf.parentId).toBe(mid.id)
+	})
+
+	test('insertion order in the source array does not matter - children-before-parent in the input still resolves correctly', async () => {
+		const legacyCategories = [
+			makeCategory({ id: 3, parentId: 2, titleRu: 'Leaf' }),
+			makeCategory({ id: 2, parentId: 1, titleRu: 'Mid' }),
+			makeCategory({ id: 1, parentId: 0, titleRu: 'Root' })
+		]
+		const result = await db.transaction(tx => bootstrapCategories(tx, legacyCategories, 'write'))
+		expect(result.summary.created).toBe(3)
+		const rows = await db.select().from(categories)
+		const mid = rows.find(r => r.nameRu === 'Mid')!
+		const leaf = rows.find(r => r.nameRu === 'Leaf')!
+		expect(leaf.parentId).toBe(mid.id)
+	})
+})
+
+describe('bootstrapCategories: Requirement 6 (never invent an identifier)', () => {
+	test('parent_id=0 (legacy "no parent" sentinel) imports as a real root, not a fabricated parent', async () => {
+		const result = await db.transaction(tx => bootstrapCategories(tx, [makeCategory({ id: 1, parentId: 0 })], 'write'))
+		const [row] = await db.select().from(categories)
+		expect(row.parentId).toBeNull()
+		expect(result.summary.skipped).toBe(0)
+	})
+
+	test('a nonzero parent_id that references no real legacy category is reported as invalid_parent, never silently rooted', async () => {
+		const result = await db.transaction(tx => bootstrapCategories(tx, [makeCategory({ id: 1, parentId: 999 })], 'write'))
+		expect(result.summary.skipped).toBe(1)
+		expect(result.summary.bySkipReason.invalid_parent).toBe(1)
+		const rows = await db.select().from(categories)
+		expect(rows).toHaveLength(0)
+	})
+
+	test('a missing titleRU is never invented - skipped with reason', async () => {
+		const result = await db.transaction(tx => bootstrapCategories(tx, [makeCategory({ id: 1, titleRu: null })], 'write'))
+		expect(result.summary.bySkipReason.empty_title).toBe(1)
+	})
+})
+
+describe('bootstrapCategories: Requirement 7 + Important-B (slug conflicts at the category level)', () => {
+	test('two unrelated categories sharing a derived slug both import, distinctly, with a two-sided conflict report', async () => {
+		const result = await db.transaction(tx =>
+			bootstrapCategories(tx, [makeCategory({ id: 1, titleRu: 'Makeup' }), makeCategory({ id: 2, titleRu: 'Makeup' })], 'write')
+		)
+		expect(result.summary.created).toBe(2)
+		expect(result.summary.conflicts).toHaveLength(1)
+		expect([result.summary.conflicts[0].legacyId, result.summary.conflicts[0].otherLegacyId].sort()).toEqual([1, 2])
+	})
+})
+
+describe('bootstrap: Requirement 9/10 (dry-run default, write requires explicit mode + safety guard)', () => {
+	test('dry-run mode writes nothing to Postgres', async () => {
+		const brandResult = await db.transaction(tx => bootstrapBrands(tx, [makeBrand({ id: 1 })], 'dry-run'))
+		const categoryResult = await db.transaction(tx => bootstrapCategories(tx, [makeCategory({ id: 1 })], 'dry-run'))
+		expect(brandResult.summary.created).toBe(1) // reported as a PLAN
+		expect(categoryResult.summary.created).toBe(1)
+		expect(await db.select().from(brands)).toHaveLength(0) // but nothing actually persisted
+		expect(await db.select().from(categories)).toHaveLength(0)
+		expect(await db.select().from(externalEntityMappings)).toHaveLength(0)
+	})
+
+	test('the bootstrap CLI reuses catalog-importer.ts\'s own assertSafeImportTarget, not a parallel safety check', () => {
+		expect(() => assertSafeImportTarget('postgres://user:pass@localhost:5432/beauty_store')).toThrow()
+		expect(() => assertSafeImportTarget('postgres://user:pass@localhost:5432/beauty_store_test')).not.toThrow()
+	})
+})
+
+describe('bootstrap: Requirement 11 (idempotency)', () => {
+	test('running bootstrapBrands twice against identical input yields the same internal id and no duplicate rows', async () => {
+		const legacy = [makeBrand({ id: 1, title: 'Anny' })]
+		const first = await db.transaction(tx => bootstrapBrands(tx, legacy, 'write'))
+		const second = await db.transaction(tx => bootstrapBrands(tx, legacy, 'write'))
+		expect(second.summary.created).toBe(0)
+		expect(second.summary.updated).toBe(1)
+		expect(second.units[0].internalId).toBe(first.units[0].internalId)
+		expect(await db.select().from(brands)).toHaveLength(1)
+		expect(await db.select().from(externalEntityMappings).where(eq(externalEntityMappings.entityType, 'brand'))).toHaveLength(1)
+	})
+
+	test('running bootstrapCategories twice against identical input yields the same internal ids and no duplicate rows', async () => {
+		const legacy = [makeCategory({ id: 1, parentId: 0, titleRu: 'Root' }), makeCategory({ id: 2, parentId: 1, titleRu: 'Child' })]
+		const first = await db.transaction(tx => bootstrapCategories(tx, legacy, 'write'))
+		const second = await db.transaction(tx => bootstrapCategories(tx, legacy, 'write'))
+		expect(second.summary.created).toBe(0)
+		expect(second.summary.updated).toBe(2)
+		expect(await db.select().from(categories)).toHaveLength(2)
+		for (const u of second.units) {
+			const matching = first.units.find(f => f.legacyId === u.legacyId)
+			expect(u.internalId).toBe(matching?.internalId)
+		}
+	})
+})
+
+describe('bootstrap: Requirement 12 (transaction rollback)', () => {
+	test('a failure partway through a bootstrap leaves the database unchanged', async () => {
+		const legacy = [makeBrand({ id: 1, title: 'Anny' }), makeBrand({ id: 2, title: 'Dior' })]
+		await expect(
+			db.transaction(async tx => {
+				await bootstrapBrands(tx, legacy, 'write')
+				throw new Error('forced failure after a successful write')
+			})
+		).rejects.toThrow('forced failure after a successful write')
+
+		expect(await db.select().from(brands)).toHaveLength(0)
+		expect(await db.select().from(externalEntityMappings)).toHaveLength(0)
+	})
+})
+
+describe('bootstrap: Requirement 13 (product brand/category reconciliation after bootstrap)', () => {
+	test('a product import that previously reported missing brand/category now resolves both once the bootstrap has run', async () => {
+		const legacyProduct = makeLegacyProduct({ id: 100, guid: '100', titleRu: 'Lipstick', brandId: 5, categoryId: 7, uriRu: null })
+		const dump = makeDump({
+			products: [legacyProduct],
+			brands: [makeBrand({ id: 5, title: 'Anny' })],
+			categories: [makeCategory({ id: 7, titleRu: 'Makeup' })],
+			productCategories: [{ id: 1, productId: 100, categoryId: 7 }]
+		})
+		const oneCRaw = [{ ID_nom: '100', Brand: 'Anny', Sex: 'Женский' }]
+		const oneCRecords = parseProductsFeed(oneCRaw).validRecords
+
+		// Phase 1: import the product BEFORE the bootstrap exists - brand/category must be unresolved.
+		const beforeInput: CatalogImportInput = {
+			dump,
+			oneCRecords,
+			families: reconcileFamilies(dump, oneCRecords),
+			positions: reconcileSqlWith1c(dump, oneCRecords),
+			idNomDuplicates: classifyIdNomDuplicates(oneCRaw, 'ID_nom')
+		}
+		const before = await db.transaction(tx => runCatalogImport(tx, beforeInput, 'write'))
+		expect(before.units[0].unpublishedForMissingBrand).toBe(true)
+		expect(before.units[0].unpublishedForMissingCategory).toBe(true)
+		const [productBefore] = await db.select().from(products).where(eq(products.id, before.units[0].productId as string))
+		expect(productBefore.status).toBe('draft')
+		expect(productBefore.brandId).toBeNull()
+
+		// Phase 2: run the bootstrap.
+		await db.transaction(async tx => {
+			await bootstrapBrands(tx, dump.brands, 'write')
+			await bootstrapCategories(tx, dump.categories, 'write')
+		})
+
+		// Phase 3: re-run the SAME product import - brand/category must now resolve, without re-architecting catalog-importer.ts's own generic mapping lookup.
+		const afterInput: CatalogImportInput = {
+			...beforeInput,
+			families: reconcileFamilies(dump, oneCRecords),
+			positions: reconcileSqlWith1c(dump, oneCRecords)
+		}
+		const after = await db.transaction(tx => runCatalogImport(tx, afterInput, 'write'))
+		expect(after.units[0].unpublishedForMissingBrand).toBe(false)
+		expect(after.units[0].unpublishedForMissingCategory).toBe(false)
+		const [productAfter] = await db.select().from(products).where(eq(products.id, after.units[0].productId as string))
+		expect(productAfter.status).toBe('active')
+		expect(productAfter.brandId).not.toBeNull()
+	})
+})
+
+describe('Requirement 14/15: draft-to-publishable methodology (not a fabricated real number)', () => {
+	test('countDraftToPublishableCandidates counts only created/updated units with both brand and category resolved, demonstrated on a synthetic set', () => {
+		const units = [
+			{ action: 'created', unpublishedForMissingBrand: false, unpublishedForMissingCategory: false }, // publishable
+			{ action: 'created', unpublishedForMissingBrand: true, unpublishedForMissingCategory: false }, // missing brand
+			{ action: 'updated', unpublishedForMissingBrand: false, unpublishedForMissingCategory: true }, // missing category
+			{ action: 'skipped', unpublishedForMissingBrand: false, unpublishedForMissingCategory: false }, // never a draft product at all
+			{ action: 'updated', unpublishedForMissingBrand: false, unpublishedForMissingCategory: false } // publishable
+		]
+		expect(countDraftToPublishableCandidates(units)).toBe(2)
+	})
+
+	test('Requirement 15: the bootstrap itself never flips a product\'s own status - only catalog-importer.ts writes `status`, and only to draft/active via its own brand+category resolution, never bulk-published by this module', async () => {
+		const legacyProduct = makeLegacyProduct({ id: 200, guid: '200', titleRu: 'Serum', brandId: 9, categoryId: null })
+		const dump = makeDump({ products: [legacyProduct], brands: [makeBrand({ id: 9, title: 'Dior' })] })
+		await db.transaction(tx => bootstrapBrands(tx, dump.brands, 'write'))
+
+		const oneCRaw = [{ ID_nom: '200', Brand: 'Dior', Sex: 'Женский' }]
+		const oneCRecords = parseProductsFeed(oneCRaw).validRecords
+		const input: CatalogImportInput = {
+			dump,
+			oneCRecords,
+			families: reconcileFamilies(dump, oneCRecords),
+			positions: reconcileSqlWith1c(dump, oneCRecords),
+			idNomDuplicates: classifyIdNomDuplicates(oneCRaw, 'ID_nom')
+		}
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'write'))
+		// brand resolved, category did NOT (none supplied) -> still draft, never auto-published
+		const [row] = await db.select().from(products).where(eq(products.id, result.units[0].productId as string))
+		expect(row.status).toBe('draft')
+	})
+})
+
+describe('Important-A: quarantinedPositionsTotal vs bySkipReason.quarantine (12B.2.1 fix should keep them equal)', () => {
+	test('for a synthetic set with quarantined positions, the two counters agree - a future mismatch is itself a regression signal, not expected noise', async () => {
+		const quarantined = makeLegacyProduct({ id: 300, titleRu: 'Quarantined item' })
+		const dump = makeDump({ products: [quarantined] })
+		const oneCRaw = [{ ID_nom: '300', Brand: 'X', Sex: 'Женский' }]
+		const oneCRecords = parseProductsFeed(oneCRaw).validRecords
+		const priorQuarantine = new Map([[300, ['duplicate_guid'] as ('duplicate_guid' | 'invalid_brand_reference' | 'duplicate_sku')[]]])
+		const input: CatalogImportInput = {
+			dump,
+			oneCRecords,
+			families: reconcileFamilies(dump, oneCRecords, priorQuarantine),
+			positions: reconcileSqlWith1c(dump, oneCRecords, priorQuarantine),
+			idNomDuplicates: classifyIdNomDuplicates(oneCRaw, 'ID_nom')
+		}
+		const result = await db.transaction(tx => runCatalogImport(tx, input, 'dry-run'))
+		// Per catalog-importer.ts's own Sprint 12B.2.1 Task 6 doc comment, these
+		// two numbers are DESIGNED to match post-fix - this test pins that
+		// invariant going forward. A real run showing 403 vs. 387 almost
+		// certainly compares a post-fix number against a PRE-fix run (the old
+		// lumped-family counting this test would have failed against).
+		expect(result.summary.quarantinedPositionsTotal).toBe(result.summary.bySkipReason.quarantine)
+	})
+})
