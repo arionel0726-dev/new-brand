@@ -312,7 +312,7 @@ describe('Sprint 12B.6.1 Task 1: atomic write + validation (runAtomicSliceWrite)
 					duplicateSkus: { ok: true, issues: [] },
 					duplicateExternalIdMappings: { ok: true, issues: [] },
 					barcodeIntegrity: { ok: true, issues: [] },
-					categoryBrandLinks: { ok: true, issues: [] }
+					categoryBrandLinks: { ok: true, issues: [], missingBrandLinks: 0, missingCategoryLinks: 0 }
 				})
 			})
 		).rejects.toThrow(PostImportChecksFailedError)

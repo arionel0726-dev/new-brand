@@ -15,6 +15,7 @@
     "import:legacy:brand-category-bootstrap": "bun run src/import/cli/brand-category-bootstrap.ts",
     "import:legacy:variant-parity-local": "bun run src/import/cli/variant-parity-local.ts",
     "import:legacy:catalog-slice": "bun run src/import/cli/catalog-slice-import.ts",
+    "import:legacy:catalog-slice-reference-bootstrap": "bun run src/import/cli/catalog-slice-reference-bootstrap.ts",
     "test": "bun test"
   },
   "dependencies": {

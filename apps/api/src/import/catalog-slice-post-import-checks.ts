@@ -148,22 +148,47 @@ export async function checkBarcodeIntegrity(tx: Tx): Promise<PostImportCheckResu
  * a direct, explicit assertion of it) consistent with the "never
  * fabricate" rule: a product with no brand/category match is expected to
  * have a null link, never a dangling or invented one.
+ *
+ * Sprint 12B.7 Requirement 9: a NULL brand_id, or a product with zero
+ * `product_categories` rows, is not reported as an `issues` failure here -
+ * it is the honest, expected state of a product imported before its
+ * reference data was bootstrapped (exactly what the real Mac run hit:
+ * `unpublishedForMissingBrand: 4` / `unpublishedForMissingCategory: 4`,
+ * with every one of those 4 products' brand_id/category links legitimately
+ * absent, not dangling). That is a RECOVERABLE gap - a later scoped
+ * reference bootstrap (scoped-reference-bootstrap.ts) plus a repeat import
+ * is expected to resolve it - and must stay distinguishable from a
+ * `brand_id`/`category_id` that points at a row which does not exist at
+ * all, which IS a hard FK-integrity failure (`ok: false`, non-empty
+ * `issues`) no amount of later bootstrapping can be "waiting on". The two
+ * new counters below report the recoverable-absence case without ever
+ * failing the check for it.
  */
-export async function checkCategoryBrandLinksResolve(tx: Tx): Promise<PostImportCheckResult> {
+export async function checkCategoryBrandLinksResolve(
+	tx: Tx
+): Promise<PostImportCheckResult & { missingBrandLinks: number; missingCategoryLinks: number }> {
 	const issues: string[] = []
 	const productRows = await tx.select({ id: products.id, brandId: products.brandId }).from(products)
 	const brandIds = new Set((await tx.select({ id: brands.id }).from(brands)).map(b => b.id))
+	let missingBrandLinks = 0
 	for (const p of productRows) {
-		if (p.brandId !== null && !brandIds.has(p.brandId)) issues.push(`product ${p.id} has brand_id ${p.brandId} which does not exist in brands`)
+		if (p.brandId === null) {
+			missingBrandLinks++
+		} else if (!brandIds.has(p.brandId)) {
+			issues.push(`product ${p.id} has brand_id ${p.brandId} which does not exist in brands`)
+		}
 	}
 
-	const categoryLinkRows = await tx.select({ categoryId: productCategories.categoryId }).from(productCategories)
+	const categoryLinkRows = await tx.select({ productId: productCategories.productId, categoryId: productCategories.categoryId }).from(productCategories)
 	const categoryIds = new Set((await tx.select({ id: categories.id }).from(categories)).map(c => c.id))
 	for (const link of categoryLinkRows) {
 		if (!categoryIds.has(link.categoryId)) issues.push(`product_categories references category_id ${link.categoryId} which does not exist in categories`)
 	}
 
-	return fail(issues)
+	const linkedProductIds = new Set(categoryLinkRows.map(link => link.productId))
+	const missingCategoryLinks = productRows.filter(p => !linkedProductIds.has(p.id)).length
+
+	return { ...fail(issues), missingBrandLinks, missingCategoryLinks }
 }
 
 export type ExpectedVariantVisibility = { variantId: string; isActive: boolean }

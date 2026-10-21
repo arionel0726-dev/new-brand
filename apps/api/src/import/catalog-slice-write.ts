@@ -31,7 +31,7 @@ export type SliceWriteChecks = {
 	duplicateSkus: PostImportCheckResult
 	duplicateExternalIdMappings: PostImportCheckResult
 	barcodeIntegrity: PostImportCheckResult
-	categoryBrandLinks: PostImportCheckResult
+	categoryBrandLinks: PostImportCheckResult & { missingBrandLinks: number; missingCategoryLinks: number }
 }
 
 export class PostImportChecksFailedError extends Error {
