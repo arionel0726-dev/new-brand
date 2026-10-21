@@ -416,6 +416,95 @@ variant X" (a real entity mapping) with "this specific barcode string
 came from feed Y" (provenance on a value), which are different kinds of
 fact.
 
+### C.6 Sprint 12B.1 implementation status
+
+C.1-C.4 above are now **implemented and applied to the isolated
+`beauty_store_test` database only** (migration
+`apps/api/drizzle/0013_strong_johnny_storm.sql`) - not production, no
+other shared environment. Every change is additive (new nullable columns
+on `products`, four new tables with foreign keys onto existing tables);
+nothing existing was renamed, dropped, or made non-nullable. The full
+Bun test suite (458 passed / 0 failed / 15 skipped, up from the Sprint
+12B.0 baseline of 438/0/15 - the +20 are this sprint's own new tests) ran
+sequentially against this migrated test database with no regression in
+Cart, Checkout, Orders, or Catalog, confirming compatibility. Order
+creation/reservation logic (Sprint 6/7) was not touched in any way this
+sprint, per the standing restriction that it is manual-operator-driven
+today and changing it needs separate sign-off.
+
+One confirmed business rule narrowed C.1's design slightly from how it
+first read: the VIZAJE-NICA 1C developer confirmed multiple barcodes per
+position occur "including due to repackaging" - a real provenance fact,
+not just a hypothetical - which is exactly what C.1's existing `source`
+column already captures; no schema change was needed beyond what was
+already proposed, only this confirmation that the column earns its place.
+
+### C.7 Content inheritance (Task 8): no schema change needed
+
+Business-rule confirmation from the 1C developer: a variant group has one
+"main" position carrying the title/description; other positions inherit
+that content and differ only by volume/color/etc. Reviewing the **already
+existing** schema against this rule found it already matches exactly:
+`products.name_ru`/`name_ro` are `NOT NULL` (the canonical, always-present
+content, matching "the main position's" title), while
+`product_variants.name_ru`/`name_ro` are nullable (an optional override,
+not a required field) - there is nothing to migrate. The decision this
+sprint makes **explicit** (previously implicit) is the read-path
+contract: a consumer reading a variant's display name must fall back to
+the parent `products` row's name when the variant's own `name_ru`/`name_ro`
+is null, never render a blank name. The two admin serialization routes
+that currently read `variant.nameRu`/`variant.nameRo` directly
+(`src/routes/v1/admin/products.ts`, `src/routes/v1/admin/variants.ts`)
+were reviewed; they pass the raw nullable value through to the admin UI
+as-is today, which is fine for an admin context (an editor needs to see
+"this variant has no override" distinctly from "this variant's override
+text is empty") - the fallback-to-parent contract applies to
+customer-facing read paths, not admin ones, and is noted here as a
+contract for Phase B's catalog-serving code to implement, not a change
+made to the admin routes this sprint.
+
+### C.8 Identity constraints (Task 9): what got a DB unique constraint and what deliberately didn't
+
+Reviewed every identity-bearing column against the two now-confirmed
+collision risks (1C developer: `ID_nom` intended-but-historically-buggy
+uniqueness; `VariativeNomenclature` intended-but-unvalidated uniqueness):
+
+- **Got a DB-level unique constraint (unchanged, and correctly so):**
+  `product_variants.sku` (`NOT NULL UNIQUE`) and
+  `product_variants.barcode` (partial unique index, non-null values only).
+  Both are **V2's own internal identifiers**, not raw unverified legacy
+  values written straight through from a feed - the existing
+  reconciliation/quarantine layer (Sprint 12A.1-12A.7) is what decides
+  which legacy records are clean enough to ever reach a `product_variants`
+  insert in the first place. A historical `ID_nom` duplicate or an
+  unverified `VariativeNomenclature` collision is caught and quarantined
+  *before* this table, never written to it, so the DB constraint here is
+  protecting V2's own invariant, not re-litigating legacy's.
+  `external_entity_mappings`' existing unique constraint on
+  `(source_system, entity_type, external_id)` is the same situation: each
+  individual `ID_nom` or group code is only ever mapped once it has been
+  confirmed (not auto-merged) by reconciliation.
+- **Deliberately did NOT get a raw-legacy-value unique constraint:**
+  there is no column anywhere in this schema that stores a raw
+  `VariativeNomenclature` group-code string as a trusted/unique key - it
+  only ever appears as `external_entity_mappings.external_id`
+  (`entity_type = 'nomenclature_group'`), which is unique *per source
+  system*, not globally validated against the 1C side's own (unverified)
+  uniqueness assumption. A collision between two unrelated 1C group codes
+  normalizing to the same string is a reconciliation-layer concern
+  (`family-reconciliation.ts`'s `collisionRisk` flag, Sprint 12A.7),
+  never something the schema itself resolves or could resolve - the
+  schema has no opinion on whether two *different* `external_id` rows
+  "really" describe the same family; it only guarantees one `external_id`
+  never silently maps to two different internal UUIDs.
+- **New tables inherit the same discipline:** `product_variant_barcodes`
+  has no unique constraint on `barcode` alone (only `(variant_id, barcode)`
+  and the partial "one global primary" index) precisely because a raw
+  barcode value is confirmed non-unique across variants (repackaging,
+  multi-pack). `inventory_locations.code` IS uniquely constrained because
+  it is V2's own enumeration of the 11 observed `Bal*` warehouses, chosen
+  and named by this schema, not an untrusted pass-through value.
+
 ---
 
 ## D. Price and inventory contracts — unresolved, not decided here
@@ -710,11 +799,23 @@ listed there are cited by number, not re-stated in full; only genuinely
 new questions from this sprint's analysis are spelled out).
 
 **From the forensic audit §13 (still open, highest priority first):**
-Q4 (group-code global uniqueness — A.3), Q6/Q7 (why do 1C feeds emit
-duplicate `ID_nom` prices, which feed is authoritative — D.1/D.4), Q10/Q11
-(`QuantityBalance`/`Bal*` meaning, is the legacy addition correct — D.5),
-Q2/Q3 (multiple-barcode meaning and primary-selection rule — see new
-question 3 below, which sharpens this), Q1 (is `ID_nom` ever reused), Q5
+Q4 (group-code global uniqueness — A.3; **Sprint 12B.1 narrowed, not
+resolved**: the 1C developer confirmed the code is *intended* to be
+unique but *not validated* by 1C - scope, i.e. per-brand or global,
+remains the open part, see new question 1 below), Q6/Q7 (which feed is
+authoritative for price; **partially resolved** - `DiscountPrice = 0`
+confirmed to mean "no discount," see C.6/the `duplicate-id-nom.ts` fix,
+but the broader "which feed wins, Price vs pricevn.json, when both are
+genuinely non-zero and disagree" question is still open), Q10/Q11
+(`QuantityBalance`/`Bal*` meaning, is the legacy addition correct — D.5,
+still fully open, C.4's schema intentionally stores raw per-location data
+without aggregating it pending this answer), Q2/Q3 (multiple-barcode
+meaning **confirmed** by both the employee and the audit - the remaining
+open part is primary-selection, sharpened as new question 3 below), Q1
+(is `ID_nom` ever reused — **partially answered**: the 1C developer
+confirmed a known historical bug produced *simultaneous* duplicate
+`ID_nom` values; whether an `ID_nom` is ever *reused* for a different
+product over time, a related but distinct question, is still open), Q5
 (are `VariativeNomenclature`/SKU/Barcode case-sensitive in 1C itself,
 independent of V2's own case-normalization choice), Q15 (is `JobVN.json`
 SEO-only or should it also carry authoritative price/content), Q16 (what
@@ -756,6 +857,29 @@ is `old_products.json`).
    ever designing the "every ~30 minutes" ongoing 1C sync mentioned in
    this Sprint 12 series' original kickoff context, since audit §1.2
    found no such scheduling mechanism exists in the audited code at all.
+   **Sprint 12B.1 confirms this sync is not yet live regardless - imports
+   are currently manual** - so this question is about future design, not
+   a currently-missed signal.
+6. (New, from Sprint 12B.1's business-rule confirmations) The 1C
+   developer confirmed multiple barcodes occur "including due to
+   repackaging" - does 1C's own data distinguish a superseded
+   (repackaged-away) barcode from a currently-valid one in any way (a
+   status flag, an end-date, simply "the most recent value wins"), or is
+   that distinction entirely absent from the source and something V2
+   would have to infer (e.g. "the barcode `update_price()`/the latest
+   feed row carries is current")? This sharpens new question 3 above
+   (primary-barcode selection) with the repackaging angle specifically.
+7. (New, from Sprint 12B.1's business-rule confirmations) The 1C
+   developer confirmed a variant group has one "main" position with the
+   title/description that others inherit. Is that "main" position
+   explicitly marked in the 1C data (a flag, a specific field value), or
+   is it something the legacy/V2 side has to infer (e.g. "the first
+   `ID_nom` seen for the group," or "the one whose title isn't blank")?
+   C.7's read-path contract (fall back to the parent `products` row) only
+   works correctly if V2's own reconciliation can reliably pick the
+   right nomenclature position to source that parent content FROM in the
+   first place - this is a Phase B population-rule question, not
+   something C.7's schema design itself can resolve.
 
 ## Verification
 
@@ -770,3 +894,43 @@ matcher) and `'confirmed_family'`/`'ambiguous_family'`/
 `'confirmed_position'`/`'ambiguous_position'`/`'unmatched_position'`/
 `'quarantine'` (family matcher) — neither ever assigns a numeric
 placeholder foreign key anywhere in either module.
+
+## Sprint 12B.1 verification
+
+C.1-C.4 implemented and applied to the isolated `beauty_store_test`
+database (migration `apps/api/drizzle/0013_strong_johnny_storm.sql`) -
+never production, never any other shared environment. One narrow,
+directly-scoped fix to `apps/api/src/import/reconcile/duplicate-id-nom.ts`
+(the 1C developer's confirmation that `DiscountPrice = 0` means "no
+discount," not a real zero-price discount - without this, a group where
+one record has `DiscountPrice: null` and another has `DiscountPrice: 0`
+wrongly escalated to `price_conflict`). No order-creation/reservation
+code (Sprint 6/7) touched.
+
+- `bunx tsc --noEmit`: clean.
+- `bunx drizzle-kit check`: clean (no drift) after the new migration was
+  applied.
+- `information_schema` + insert/reject tests against the real applied
+  schema (`apps/api/tests/schema-sprint-12b1.test.ts`, 18 tests): confirm
+  the new tables' actual constraint shape, not just "the migration ran" -
+  multiple barcodes per variant succeed, a duplicate `(variant_id,
+  barcode)` pair is rejected, two variants cannot both claim the same
+  barcode as globally primary but CAN share a non-primary barcode value,
+  cascading delete from a variant removes its barcode/inventory rows, a
+  slug alias collision across products within one locale is rejected
+  while the same slug text is allowed to repeat across different
+  locales, an unrecognized locale is rejected by the check constraint, a
+  negative per-location quantity is rejected, deleting a location that
+  still has recorded stock is rejected (RESTRICT), and
+  `product_variants.sku`/`barcode`'s existing DB-level uniqueness
+  (V2-internal identifiers) is confirmed still enforced and unchanged.
+- Two new tests in `apps/api/tests/import-duplicate-id-nom.test.ts`
+  confirm the `DiscountPrice` fix: `null` vs `0` now classifies as
+  `identical`, while `null` vs a real nonzero value still correctly
+  classifies as `price_conflict`.
+- Full suite, sequential (`bun test --parallel=1`), against the migrated
+  isolated test database, after confirming no concurrent `bun test`
+  process: **458 passed / 0 failed / 15 skipped** (473 total, 34 files) -
+  up from the Sprint 12B.0 baseline of 438/0/15 by exactly the +20 new
+  tests this sprint added, with zero regressions in Cart, Checkout,
+  Orders, or Catalog.

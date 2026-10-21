@@ -92,6 +92,13 @@
       "when": 1792506145510,
       "tag": "0012_clever_squirrel_girl",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1792567906963,
+      "tag": "0013_strong_johnny_storm",
+      "breakpoints": true
     }
   ]
 }

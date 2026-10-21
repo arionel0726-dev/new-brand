@@ -136,9 +136,25 @@ function normalizeForComparison(value: unknown): string {
 	return JSON.stringify(value)
 }
 
+/**
+ * Sprint 12B.1 (1C developer confirmation): `DiscountPrice = 0` means "no
+ * discount," the same real-world state as a missing/null `DiscountPrice` -
+ * never a genuine zero-price discount. Without this, a group where one
+ * record has `DiscountPrice: null` and another has `DiscountPrice: 0`
+ * would register as a real difference and wrongly escalate to
+ * `price_conflict`, even though both records agree there is no discount.
+ * Scoped to `DiscountPrice` only - a real `Price` of 0 is not confirmed
+ * equivalent to anything and must keep comparing literally.
+ */
+function normalizeDiscountPriceForComparison(value: unknown): string {
+	if (value === undefined || value === null || value === 0) return '\u0000NO_DISCOUNT'
+	return JSON.stringify(value)
+}
+
 function fieldsDiffer(records: Record<string, unknown>[], key: string): boolean {
-	const first = normalizeForComparison(records[0][key])
-	return records.some(r => normalizeForComparison(r[key]) !== first)
+	const normalize = key === 'DiscountPrice' ? normalizeDiscountPriceForComparison : normalizeForComparison
+	const first = normalize(records[0][key])
+	return records.some(r => normalize(r[key]) !== first)
 }
 
 export function classifyIdNomDuplicateGroup(idNom: string, records: Record<string, unknown>[]): IdNomDuplicateGroup {

@@ -65,6 +65,26 @@ describe('classifyIdNomDuplicateGroup', () => {
 		expect(result.differingFields).toContain('DiscountPrice')
 	})
 
+	test('identical (not price_conflict): DiscountPrice null on one record and 0 on another, same Price - 1C developer confirmed 0 means "no discount", same as null', () => {
+		const a = baseRecord({})
+		const b = baseRecord({})
+		;(a as Record<string, unknown>).DiscountPrice = null
+		;(b as Record<string, unknown>).DiscountPrice = 0
+		const result = classifyIdNomDuplicateGroup('1001', [a, b])
+		expect(result.classification).toBe('identical')
+		expect(result.differingFields).toEqual([])
+	})
+
+	test('price_conflict still fires when DiscountPrice is a real nonzero value vs null (not the 0-equivalence case)', () => {
+		const a = baseRecord({})
+		const b = baseRecord({})
+		;(a as Record<string, unknown>).DiscountPrice = null
+		;(b as Record<string, unknown>).DiscountPrice = 15
+		const result = classifyIdNomDuplicateGroup('1001', [a, b])
+		expect(result.classification).toBe('price_conflict')
+		expect(result.differingFields).toContain('DiscountPrice')
+	})
+
 	test('price_conflict takes priority over mutable_only/variant/barcode when Price and other soft fields both differ', () => {
 		const a = baseRecord({ Price: 100, QuantityBalance: 5, ColorVar: '396' })
 		const b = baseRecord({ Price: 150, QuantityBalance: 0, ColorVar: '253' })
