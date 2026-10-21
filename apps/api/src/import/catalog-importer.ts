@@ -109,6 +109,8 @@ import type { ProductsFeedRecord } from './parsers/products-feed'
 import type { FamilyReconciliationResult, FamilyMatch, FamilyPositionResult } from './reconcile/family-reconciliation'
 import type { ReconciliationResult } from './reconcile/sql-1c-reconciliation'
 import type { IdNomDuplicateReport, IdNomDuplicateGroup } from './reconcile/duplicate-id-nom'
+import { reconcileLegacyVariantFamilies, type LegacyVariantFamily } from './reconcile/legacy-variant-family-reconciliation'
+import type { QuarantineReasonCode } from './dry-run-catalog'
 
 export type CatalogImportMode = 'dry-run' | 'write'
 
@@ -121,7 +123,7 @@ export type CatalogImportInput = {
 	idNomDuplicates: IdNomDuplicateReport
 }
 
-export type CatalogImportUnitKind = 'family' | 'standalone'
+export type CatalogImportUnitKind = 'family' | 'standalone' | 'legacy_variant_family'
 
 export type CatalogImportSkipReason =
 	| 'ambiguous_family'
@@ -764,10 +766,67 @@ export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: 
 
 	const handledLegacyIds = new Set<number>()
 
+	// --- Pass 0 (Sprint 12B.5): legacy products_variable.product_id reconstructed
+	// families -> one product + N variants, keyed by legacy products.id rather
+	// than VariativeNomenclature group code. Runs BEFORE Pass 1/Pass 2 so a
+	// legacy product reconstructed here is never ALSO processed by either
+	// older path - see the Pass 1 member-filtering below for the other half of
+	// that guarantee.
+	const priorQuarantine = new Map<number, QuarantineReasonCode[]>()
+	for (const r of input.positions.mysqlResults) {
+		if (r.priorQuarantineReasonCodes && r.priorQuarantineReasonCodes.length > 0) priorQuarantine.set(r.legacyProductId, r.priorQuarantineReasonCodes)
+	}
+	const legacyVariantFamilies = reconcileLegacyVariantFamilies(input.dump, input.oneCRecords, priorQuarantine)
+	const legacyVariantFamilyClaimedIds = new Set<number>()
+
+	for (const family of legacyVariantFamilies.families) {
+		handledLegacyIds.add(family.legacyProductId)
+		legacyVariantFamilyClaimedIds.add(family.legacyProductId)
+
+		const key = `legacy-variant-family-${family.legacyProductId}`
+		if (family.classification === 'quarantined') {
+			units.push(skipUnit('legacy_variant_family', key, 'quarantine', family.reasoning))
+			continue
+		}
+
+		const parent = productById.get(family.legacyProductId)
+		if (!parent) {
+			// Requirement 10: reconcileLegacyVariantFamilies already excludes a
+			// product_id that doesn't resolve to a parsed parent row - guarded
+			// here too so a parent is never fabricated even if that invariant
+			// were ever violated upstream.
+			units.push(skipUnit('legacy_variant_family', key, 'unmatched_position', 'parent legacy product row not found for this product_id hypothesis - never fabricated'))
+			continue
+		}
+
+		const mainPosition = positionByLegacyId.get(family.legacyProductId)
+		const mainIdNom =
+			mainPosition?.outcome === 'confirmed' && mainPosition.matchedOneCIdNoms.length === 1 ? mainPosition.matchedOneCIdNoms[0] : undefined
+
+		const outcome = await importLegacyVariantFamily(
+			tx,
+			family,
+			parent,
+			mainIdNom,
+			oneCRecordsByIdNom,
+			idNomDuplicateGroupsByIdNom,
+			input.dump,
+			dryRun,
+			slugLedger
+		)
+		units.push(outcome)
+	}
+
 	// --- Pass 1: confirmed families -> one product + N variants. ---
 	for (const family of input.families.families) {
-		if (family.mysqlMemberIds.length === 0) continue // 1C-only family, nothing on the MySQL side to import
-		for (const id of family.mysqlMemberIds) handledLegacyIds.add(id)
+		// Requirement 3/11: a legacy product already reconstructed by Pass 0
+		// above is never re-processed here - a member id claimed there is
+		// excluded from this family's membership entirely, not merely skipped
+		// as a duplicate (the two paths would otherwise double-claim the same
+		// legacy product under two unrelated external ids).
+		const mysqlMemberIds = family.mysqlMemberIds.filter(id => !legacyVariantFamilyClaimedIds.has(id))
+		if (mysqlMemberIds.length === 0) continue // every member handled by Pass 0, or 1C-only family with nothing on the MySQL side
+		for (const id of mysqlMemberIds) handledLegacyIds.add(id)
 
 		if (family.outcome !== 'confirmed_family' || family.collisionRisk) {
 			// Sprint 12B.2.1 Task 6 fix: an unresolved family used to collapse
@@ -786,7 +845,7 @@ export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: 
 			// position-level outcome (quarantine takes priority, exactly as
 			// `reconcileSqlWith1c` itself already decides it), so no member's
 			// individual status is ever lost inside a family-level lump.
-			for (const memberId of family.mysqlMemberIds) {
+			for (const memberId of mysqlMemberIds) {
 				const position = positionByLegacyId.get(memberId)
 				const reason: CatalogImportSkipReason =
 					position?.outcome === 'quarantine'
@@ -810,7 +869,7 @@ export async function runCatalogImport(tx: Tx, input: CatalogImportInput, mode: 
 			continue
 		}
 
-		const positions = input.families.positions.filter(p => p.normalizedCode === family.normalizedCode && family.mysqlMemberIds.includes(p.mysqlProductId))
+		const positions = input.families.positions.filter(p => p.normalizedCode === family.normalizedCode && mysqlMemberIds.includes(p.mysqlProductId))
 		const confirmedPositions = positions.filter((p): p is FamilyPositionResult & { outcome: 'confirmed_position' } => p.outcome === 'confirmed_position')
 		if (confirmedPositions.length === 0) {
 			units.push(skipUnit('family', family.normalizedCode, 'unmatched_position', 'family matched, but no individual member resolved to a confirmed position'))
@@ -1118,6 +1177,222 @@ async function importFamily(
 		categoryLinkConflict,
 		note: `${dryRun ? 'dry-run: would ' : ''}${action} family product (${variantIds.length} variant(s), ${barcodesPlanned} barcode row(s) ${dryRun ? 'planned' : 'written'}, ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s)${categoryLinkConflict ? ', category link conflict between family members' : ''}${legacyHidden ? ', legacy-hidden' : ''})`
 	}
+}
+
+/**
+ * Sprint 12B.5 Pass 0: builds the write/plan for one legacy
+ * `products_variable.product_id`-reconstructed family - a single legacy
+ * `products` row (the parent/hypothesis) whose `products_variable` children
+ * independently corroborated against 1C evidence (via
+ * `reconcileLegacyVariantFamilies`, which reuses `matchLegacyVariants`
+ * rather than reimplementing variant matching) become MULTIPLE
+ * `product_variants` rows under ONE `products` row. Same unified
+ * dry-run/write code path and three-phase (identity -> read-only
+ * computation -> write) structure as `importFamily` - deliberately modeled
+ * on it rather than diverging, so the two write paths stay auditable
+ * side-by-side. Differs from `importFamily` in two ways: there is only ever
+ * ONE parent position (no main-position selection across members, since the
+ * members here are `products_variable` rows, not independent `products`
+ * rows), and per-variant media comes from `products_variable_img`
+ * (keyed by `variableId`) rather than `products_img` (keyed by the member's
+ * own `products.id`).
+ */
+async function importLegacyVariantFamily(
+	tx: Tx,
+	family: LegacyVariantFamily,
+	parent: LegacyProduct,
+	mainIdNom: string | undefined,
+	oneCRecordsByIdNom: Map<string, ProductsFeedRecord[]>,
+	idNomDuplicateGroupsByIdNom: Map<string, IdNomDuplicateGroup>,
+	dump: LegacyCatalogDump,
+	dryRun: boolean,
+	slugLedger: DryRunSlugLedger | null
+): Promise<CatalogImportUnitOutcome> {
+	const externalId = `legacy-variant-family-${family.legacyProductId}`
+	const mainResolution = resolveOneCRecord(mainIdNom ?? '', oneCRecordsByIdNom, idNomDuplicateGroupsByIdNom)
+	const content = buildContent(parent, mainResolution.record, externalId)
+	const { slug } = canonicalSlugFor(parent, externalId)
+
+	const candidateProductId = crypto.randomUUID()
+	const mode: CatalogImportMode = dryRun ? 'dry-run' : 'write'
+	const productMapping = await resolveIdentity(tx, mode, {
+		sourceSystem: 'legacy_mysql',
+		entityType: 'nomenclature_group',
+		externalId,
+		internalId: candidateProductId
+	})
+	if (productMapping.outcome === 'conflict') {
+		return skipUnit(
+			'legacy_variant_family',
+			externalId,
+			'mapping_conflict_product',
+			'external_entity_mappings conflict for this reconstructed product_id family - never auto-resolved'
+		)
+	}
+	const productId = productMapping.mapping.internalId
+	const existingProductId = productMapping.outcome === 'existing' ? productId : null
+
+	// Phase 1: identity-only resolution for every independently-confirmed
+	// member (Requirement 6: each 1C ID_nom maps to at most one
+	// product_variants row - enforced upstream by
+	// reconcileLegacyVariantFamilies' duplicate-membership detection, and
+	// again here by the standard resolveIdentity conflict check every other
+	// write path in this file uses).
+	type ResolvedMember = {
+		member: LegacyVariantFamily['confirmedMembers'][number]
+		oneC: OneCResolution
+		candidateVariantId: string
+		variantMapping: ResolvedMapping
+		variantId: string
+	}
+	const resolved: ResolvedMember[] = []
+	for (const member of family.confirmedMembers) {
+		const oneC = resolveOneCRecord(member.idNom, oneCRecordsByIdNom, idNomDuplicateGroupsByIdNom)
+		const candidateVariantId = crypto.randomUUID()
+		const variantMapping = await resolveIdentity(tx, mode, {
+			sourceSystem: 'legacy_mysql',
+			entityType: 'product_variant',
+			externalId: `variable-${member.variableId}`,
+			internalId: candidateVariantId
+		})
+		if (variantMapping.outcome === 'conflict') continue
+		const variantId = variantMapping.mapping.internalId
+		const nomenclatureMapping = await resolveIdentity(tx, mode, {
+			sourceSystem: '1c',
+			entityType: 'nomenclature',
+			externalId: member.idNom,
+			internalId: variantId
+		})
+		if (nomenclatureMapping.outcome === 'conflict' || nomenclatureMapping.mapping.internalId !== variantId) continue
+		resolved.push({ member, oneC, candidateVariantId, variantMapping, variantId })
+	}
+
+	if (resolved.length === 0) {
+		if (!dryRun) throw new ZeroVariantProductError('legacy_variant_family', externalId)
+		return skipUnit(
+			'legacy_variant_family',
+			externalId,
+			'unmatched_position',
+			"every confirmed member's variant-identity mapping conflicted - would publish zero variants, so this reconstructed family is skipped rather than auto-published"
+		)
+	}
+
+	// Phase 2: read-only computations (brand/slug/category), same pattern as importFamily.
+	const brandId = parent.brandId !== null ? await resolveBrandId(tx, parent.brandId) : null
+	const uniqueSlug = await ensureUniqueSlug(tx, slug, externalId, existingProductId, productId, slugLedger)
+	const { linkedCategoryIds } = await writeCategoryLinksPreview(tx, parent, dump)
+	const unpublishedForMissingCategory = linkedCategoryIds.length === 0
+	// Requirement 7: the single parent's own legacy isShown is the
+	// product-level visibility signal here (there is only one parent, unlike
+	// importFamily's multi-member main-position choice).
+	const legacyHidden = !parent.isShown
+	const status: 'draft' | 'active' = brandId === null || unpublishedForMissingCategory || legacyHidden ? 'draft' : 'active'
+
+	// Phase 3: write the product row first, then everything FK-dependent on it.
+	let action: 'created' | 'updated'
+	if (!dryRun) {
+		const written = await writeProductRow(tx, productMapping, candidateProductId, { brandId, slug: uniqueSlug, content, status })
+		action = written.action
+	} else {
+		action = productMapping.outcome === 'created' ? 'created' : 'updated'
+	}
+	if (!dryRun) await persistCategoryLinks(tx, productId, linkedCategoryIds)
+
+	const variantIds: string[] = []
+	let barcodesPlanned = 0
+	for (const r of resolved) {
+		if (!dryRun) {
+			await writeVariantRow(tx, r.variantMapping, r.candidateVariantId, productId, {
+				// Requirement 6: the real matched 1C ID_nom is always used
+				// verbatim as product_variants.sku - same rule as importFamily.
+				sku: r.member.idNom,
+				// Requirement 5: color/volume are variant ATTRIBUTES stored on
+				// the variant row's own content elsewhere (not grouping keys);
+				// a variant's own title only overrides the parent's when it
+				// genuinely differs, mirroring importFamily's member-vs-main
+				// comparison exactly.
+				nameRu: r.member.titleRu !== null && r.member.titleRu !== parent.titleRu ? r.member.titleRu : null,
+				nameRo: r.member.titleRo !== null && r.member.titleRo !== parent.titleRo ? r.member.titleRo : null,
+				// Requirement 7: each variant's OWN legacy isShown, independent
+				// of the product-level visibility computed above - a
+				// partially-hidden reconstructed family (some variants shown,
+				// some not) reflects that per-variant.
+				isActive: r.member.isShown
+			})
+		}
+		variantIds.push(r.variantId)
+		// Requirement 8: every distinct barcode for this ID_nom's whole
+		// duplicate group, plus the variable row's own MySQL barcode.
+		barcodesPlanned += await writeBarcodeRows(tx, r.variantId, r.member.barcode, r.oneC.barcodes, dryRun)
+	}
+
+	const conflicts: CatalogImportSlugAliasConflict[] = []
+	const legacyUris: { locale: 'ru' | 'ro'; slug: string; source: string; isCanonical: boolean }[] = []
+	if (parent.uriRu !== null) legacyUris.push({ locale: 'ru', slug: parent.uriRu.trim().toLowerCase(), source: 'legacy_uri_ru', isCanonical: false })
+	if (parent.uriRo !== null) legacyUris.push({ locale: 'ro', slug: parent.uriRo.trim().toLowerCase(), source: 'legacy_uri_ro', isCanonical: false })
+	await writeSlugAliases(tx, productId, uniqueSlug, legacyUris, conflicts, dryRun, slugLedger)
+
+	// Shared parent-level images (legacy products_img, written under variantId=null) ...
+	const sharedMediaWritten = await writeMediaRows(tx, dump, productId, [parent.id], new Map(), dryRun)
+	// ... plus each confirmed variant's OWN images (legacy products_variable_img, keyed by variableId - not reachable through writeMediaRows at all).
+	const variantMediaWritten = await writeVariantSpecificMediaRows(
+		tx,
+		dump,
+		productId,
+		resolved.map(r => ({ variableId: r.member.variableId, variantId: r.variantId })),
+		dryRun
+	)
+	const mediaWritten = sharedMediaWritten + variantMediaWritten
+
+	const totalMembers = family.confirmedMembers.length + family.unconfirmedMembers.length
+	return {
+		kind: 'legacy_variant_family',
+		key: externalId,
+		action,
+		productId,
+		variantIds,
+		barcodesWritten: barcodesPlanned,
+		mediaRowsWritten: mediaWritten,
+		slugAliasConflicts: conflicts,
+		unpublishedForMissingBrand: brandId === null,
+		unpublishedForMissingCategory,
+		note: `${dryRun ? 'dry-run: would ' : ''}${action} reconstructed product_id family (classification=${family.classification}, ${variantIds.length}/${totalMembers} products_variable rows confirmed, ${barcodesPlanned} barcode row(s) ${dryRun ? 'planned' : 'written'}, ${mediaWritten} media row(s), ${conflicts.length} slug conflict(s)${legacyHidden ? ', legacy-hidden' : ''})`
+	}
+}
+
+/**
+ * Per-variant equivalent of `writeMediaRows` for the Sprint 12B.5 path:
+ * legacy `products_variable_img` rows are keyed by `variableId`, not by a
+ * member's own `products.id` (the thing `writeMediaRows`'
+ * `memberMysqlIds`/`variantIdByMysqlId` indirection assumes), so they are
+ * written here directly against each resolved variant rather than being
+ * forced through `writeMediaRows`'s id space. Same idempotency pattern:
+ * existence keyed on `(productId, variantId, url)`, `dryRun` gates only the
+ * final insert.
+ */
+async function writeVariantSpecificMediaRows(
+	tx: Tx,
+	dump: LegacyCatalogDump,
+	productId: string,
+	members: { variableId: number; variantId: string }[],
+	dryRun: boolean
+): Promise<number> {
+	let planned = 0
+	const variantIdByVariableId = new Map(members.map(m => [m.variableId, m.variantId]))
+	for (const img of dump.productVariableImgs) {
+		const variantId = variantIdByVariableId.get(img.variableId)
+		if (!variantId || img.img === null) continue
+		const [existing] = await tx
+			.select({ id: productImages.id })
+			.from(productImages)
+			.where(and(eq(productImages.productId, productId), eq(productImages.variantId, variantId), eq(productImages.url, img.img)))
+			.limit(1)
+		if (existing) continue
+		planned++
+		if (dryRun) continue
+		await tx.insert(productImages).values({ productId, variantId, url: img.img, sortOrder: img.sortOrder ?? 0 })
+	}
+	return planned
 }
 
 /** Same unified dry-run/write code path as importFamily - see its doc comment. */
