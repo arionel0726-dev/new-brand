@@ -8,3 +8,7 @@ apps/api/node_modules/
 .DS_Store
 .next/
 dist/
+
+# Sprint 12B.10: local pg_dump backups created by the catalog migration
+# workflow's write-mode pre-write backup step - never committed.
+.catalog-migration-backups/

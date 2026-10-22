@@ -18,6 +18,7 @@
     "import:legacy:catalog-slice-reference-bootstrap": "bun run src/import/cli/catalog-slice-reference-bootstrap.ts",
     "import:legacy:brand-readiness-analysis": "bun run src/import/cli/brand-readiness-analysis.ts",
     "import:legacy:brand-representative-slice": "bun run src/import/cli/brand-representative-slice.ts",
+    "import:legacy:catalog-workflow": "bun run src/import/cli/catalog-migration-workflow.ts",
     "test": "bun test"
   },
   "dependencies": {
