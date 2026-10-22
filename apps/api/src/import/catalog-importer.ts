@@ -282,30 +282,61 @@ export class UnsafeImportTargetError extends Error {}
 const ALLOWED_LOCAL_IMPORT_HOSTS = new Set(['localhost', '127.0.0.1'])
 const EXPECTED_LOCAL_TEST_DATABASE = 'beauty_store_test'
 
-export function assertSafeImportTarget(databaseUrl: string): void {
-	let url: URL
+/** Parses `databaseUrl`, failing closed (never defaulting to permissive) on anything unparseable. Shared by every check below so they all fail the same way on a malformed URL. */
+function parseDatabaseUrlOrThrow(databaseUrl: string): URL {
 	try {
-		url = new URL(databaseUrl)
+		return new URL(databaseUrl)
 	} catch {
-		throw new UnsafeImportTargetError(`DATABASE_URL is not a valid URL - refusing write-mode import (failing closed)`)
+		throw new UnsafeImportTargetError(`DATABASE_URL is not a valid URL - refusing (failing closed)`)
 	}
+}
 
+/**
+ * Sprint 12B.10.1: split out of `assertSafeImportTarget` so a read-only
+ * caller (e.g. the catalog-migration-workflow's analysis path) can require
+ * "this is some local Postgres instance, never an arbitrary remote/production
+ * host" WITHOUT also requiring the exact `beauty_store_test` database name -
+ * a plain read-only query against the developer's own local dev database is
+ * safe in a way a write never is, but a read-only query against a random
+ * remote host still is not something this tooling should ever do silently.
+ */
+export function assertLocalHost(databaseUrl: string): void {
+	const url = parseDatabaseUrlOrThrow(databaseUrl)
 	const host = url.hostname.toLowerCase()
 	if (!ALLOWED_LOCAL_IMPORT_HOSTS.has(host)) {
 		throw new UnsafeImportTargetError(
-			`Refusing write-mode catalog import: DATABASE_URL host "${host}" is not in the local isolated-Postgres allowlist ` +
-				`(${[...ALLOWED_LOCAL_IMPORT_HOSTS].join(', ')}). Production and arbitrary remote hosts are never permitted for write mode.`
+			`Refusing: DATABASE_URL host "${host}" is not in the local isolated-Postgres allowlist ` +
+				`(${[...ALLOWED_LOCAL_IMPORT_HOSTS].join(', ')}). Production and arbitrary remote hosts are never permitted.`
 		)
 	}
+}
 
+/** Sprint 12B.10.1: the exact-database-name half of `assertSafeImportTarget`, split out so it can be required for write mode only. */
+export function assertExactDatabaseName(databaseUrl: string, expectedDatabase: string): void {
+	const url = parseDatabaseUrlOrThrow(databaseUrl)
 	const name = url.pathname.replace(/^\//, '')
-	if (name !== EXPECTED_LOCAL_TEST_DATABASE) {
+	if (name !== expectedDatabase) {
 		throw new UnsafeImportTargetError(
 			`Refusing write-mode catalog import: DATABASE_URL database name "${name}" does not exactly match the expected ` +
-				`isolated test database "${EXPECTED_LOCAL_TEST_DATABASE}". Write mode only runs against that exact database by ` +
+				`isolated test database "${expectedDatabase}". Write mode only runs against that exact database by ` +
 				`design - see docs/vizaje-identity-architecture.md §E.`
 		)
 	}
+}
+
+/**
+ * Task 15's enforced environment safety guard, hardened in Sprint 12B.4
+ * Priority 6 to an explicit host+database-name allowlist (see
+ * `assertLocalHost`/`assertExactDatabaseName` above, which this composes
+ * unchanged - existing callers of this combined check keep their exact
+ * prior behavior). Reserved for write-mode / mutating operations only; a
+ * read-only caller should use `assertLocalHost` alone (see
+ * catalog-migration-workflow.ts's `runWorkflowReadOnlyPreflight` vs
+ * `runWorkflowWritePreflight`/`runWorkflowWrite`).
+ */
+export function assertSafeImportTarget(databaseUrl: string): void {
+	assertLocalHost(databaseUrl)
+	assertExactDatabaseName(databaseUrl, EXPECTED_LOCAL_TEST_DATABASE)
 }
 
 /** The MySQL family member chosen to supply the family's canonical product-level content (Requirement 8's "one main position" rule - Sprint 12B.1 business-rule confirmation 4). Deterministic: lowest legacy product id among members that have a non-null titleRu, falling back to the lowest id overall if none do. */

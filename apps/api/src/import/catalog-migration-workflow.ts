@@ -40,7 +40,14 @@ import {
 	checkBarcodeIntegrity,
 	checkCategoryBrandLinksResolve
 } from './catalog-slice-post-import-checks'
-import { runCatalogImport, assertSafeImportTarget, UnsafeImportTargetError, type CatalogImportInput, type CatalogImportResult } from './catalog-importer'
+import {
+	runCatalogImport,
+	assertSafeImportTarget,
+	assertLocalHost,
+	UnsafeImportTargetError,
+	type CatalogImportInput,
+	type CatalogImportResult
+} from './catalog-importer'
 import { runScopedReferenceBootstrap, extractReferencedBrandCategorySlice } from './scoped-reference-bootstrap'
 import { createDatabaseBackup, BackupFailedError, type BackupResult, type CreateDatabaseBackupOptions } from './catalog-migration-backup'
 
@@ -98,12 +105,24 @@ export type WorkflowReport = {
 	warnings: string[]
 }
 
-/** Requirement 3: confirms DATABASE_URL is a safe local target, the DB is reachable, and migrations are current - all read-only, nothing is ever written or auto-migrated here. */
-export async function runWorkflowPreflight(db: Database, databaseUrl: string, checkMigrations: () => Promise<{ ok: boolean; raw: string }>): Promise<WorkflowPreflightResult> {
+/**
+ * Shared preflight body: runs `assertTarget` (the only part that differs
+ * between read-only and write preflight - see below), then, only if that
+ * passes, a cheap `SELECT 1` reachability check, then, only if THAT passes,
+ * the read-only `drizzle-kit check` migration-drift check. Nothing here ever
+ * writes or auto-migrates.
+ */
+async function runPreflightChecks(
+	db: Database,
+	databaseUrl: string,
+	checkMigrations: () => Promise<{ ok: boolean; raw: string }>,
+	assertTarget: (url: string) => void,
+	safeTargetOkDetail: string
+): Promise<WorkflowPreflightResult> {
 	let safeTarget: WorkflowPreflightCheck
 	try {
-		assertSafeImportTarget(databaseUrl)
-		safeTarget = { ok: true, detail: 'DATABASE_URL points at the isolated local beauty_store_test database.' }
+		assertTarget(databaseUrl)
+		safeTarget = { ok: true, detail: safeTargetOkDetail }
 	} catch (error) {
 		safeTarget = { ok: false, detail: error instanceof UnsafeImportTargetError ? error.message : String(error) }
 	}
@@ -133,6 +152,47 @@ export async function runWorkflowPreflight(db: Database, databaseUrl: string, ch
 	}
 
 	return { safeTarget, reachable, migrationsCurrent, ok: safeTarget.ok && reachable.ok && migrationsCurrent.ok }
+}
+
+/**
+ * Sprint 12B.10.1 fix: the read-only preflight for `runWorkflowAnalysis`.
+ * Deliberately does NOT require the exact `beauty_store_test` database name
+ * - a pure read-only analysis/preview is safe against the developer's own
+ * local dev database (e.g. `beauty_store_dev`), precisely BECAUSE every DB
+ * interaction `runWorkflowAnalysis` performs runs inside
+ * `runInRolledBackTransaction` and is therefore guaranteed never to commit
+ * anything (see that function's own unconditional-rollback contract, and
+ * catalog-slice-db.test.ts's "a real (non-sentinel) error inside the
+ * callback still propagates, not swallowed as a rollback" / this module's
+ * own "Requirement 4" test proving a real write followed by a thrown error
+ * still leaves zero rows). It still refuses a non-local host via
+ * `assertLocalHost` - a read-only query against an arbitrary remote or
+ * production host is still never something this tool should do silently.
+ */
+export async function runWorkflowReadOnlyPreflight(
+	db: Database,
+	databaseUrl: string,
+	checkMigrations: () => Promise<{ ok: boolean; raw: string }>
+): Promise<WorkflowPreflightResult> {
+	return runPreflightChecks(db, databaseUrl, checkMigrations, assertLocalHost, 'DATABASE_URL points at a local Postgres host - safe for a rolled-back read-only analysis.')
+}
+
+/**
+ * Sprint 12B.10.1 fix: the write preflight for `runWorkflowWrite`, kept
+ * EXACTLY as strict as the original single `runWorkflowPreflight` always
+ * was - full `assertSafeImportTarget` (localhost allowlist AND exact
+ * `beauty_store_test` database name). `runWorkflowWrite` itself still calls
+ * `assertSafeImportTarget` directly as its own first line of defense
+ * (unchanged); this is the CLI-facing preflight equivalent so write mode
+ * gets the same structured preflight report as read-only mode before it
+ * ever reaches the write path.
+ */
+export async function runWorkflowWritePreflight(
+	db: Database,
+	databaseUrl: string,
+	checkMigrations: () => Promise<{ ok: boolean; raw: string }>
+): Promise<WorkflowPreflightResult> {
+	return runPreflightChecks(db, databaseUrl, checkMigrations, assertSafeImportTarget, 'DATABASE_URL points at the isolated local beauty_store_test database.')
 }
 
 function resolveSelectionIds(inputs: WorkflowInputs, representativeSelection: RepresentativeSliceResult | null): number[] {

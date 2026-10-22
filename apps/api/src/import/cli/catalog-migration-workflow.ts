@@ -43,7 +43,15 @@ import { readJsonArrayFileBounded } from '../parsers/json-array-stream'
 import { runLegacyCatalogDryRun } from '../dry-run-catalog'
 import { quarantineMapFromCatalogDryRun } from '../reconcile/sql-1c-reconciliation'
 import { resolveSqlPath, resolveProductsPath, FileResolutionError } from '../local-file-discovery'
-import { runWorkflowPreflight, runWorkflowAnalysis, runWorkflowWrite, renderWorkflowReportText, WorkflowWriteRefusedError, type WorkflowSelection } from '../catalog-migration-workflow'
+import {
+	runWorkflowReadOnlyPreflight,
+	runWorkflowWritePreflight,
+	runWorkflowAnalysis,
+	runWorkflowWrite,
+	renderWorkflowReportText,
+	WorkflowWriteRefusedError,
+	type WorkflowSelection
+} from '../catalog-migration-workflow'
 import { checkDrizzleMigrations } from '../drizzle-migration-check'
 
 type Args = {
@@ -95,13 +103,21 @@ async function main() {
 		process.exit(1)
 	}
 
-	console.log('=== Preflight checks ===')
-	const preflight = await runWorkflowPreflight(db, env.DATABASE_URL, () => checkDrizzleMigrations())
+	// Sprint 12B.10.1 fix: read-only analysis and write mode get DISTINCT
+	// preflight checks. Read-only mode only requires a local Postgres host
+	// (it never requires the exact `beauty_store_test` database name - every
+	// query it runs is inside a rolled-back transaction) so it works safely
+	// against a developer's own local dev database. Write mode keeps the
+	// original strict check (local host AND exact `beauty_store_test` name).
+	console.log(`=== Preflight checks (${args.write ? 'write mode' : 'read-only analysis'}) ===`)
+	const preflight = args.write
+		? await runWorkflowWritePreflight(db, env.DATABASE_URL, () => checkDrizzleMigrations())
+		: await runWorkflowReadOnlyPreflight(db, env.DATABASE_URL, () => checkDrizzleMigrations())
 	console.log(`  Safe target: ${preflight.safeTarget.ok ? 'OK' : 'FAILED'} - ${preflight.safeTarget.detail}`)
 	console.log(`  Reachable: ${preflight.reachable.ok ? 'OK' : 'FAILED'} - ${preflight.reachable.detail}`)
 	console.log(`  Migrations current: ${preflight.migrationsCurrent.ok ? 'OK' : 'FAILED'} - ${preflight.migrationsCurrent.detail}`)
 	if (!preflight.ok) {
-		console.error('\nPreflight failed - refusing to run any analysis. Fix the above before retrying.')
+		console.error(`\nPreflight failed - refusing to run any ${args.write ? 'write' : 'analysis'}. Fix the above before retrying.`)
 		process.exit(1)
 	}
 

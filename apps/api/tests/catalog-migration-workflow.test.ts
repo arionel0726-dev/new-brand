@@ -1,17 +1,26 @@
-import { describe, expect, test, beforeEach } from 'bun:test'
+import { describe, expect, test, beforeEach, beforeAll, afterAll } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import postgres from 'postgres'
+import { drizzle } from 'drizzle-orm/postgres-js'
+import { migrate } from 'drizzle-orm/postgres-js/migrator'
 import { env } from '../src/config/env'
-import { db } from '../src/db/client'
+import { db, type Database } from '../src/db/client'
 import { UnsafeImportTargetError } from '../src/import/catalog-importer'
 import {
-	runWorkflowPreflight,
+	runWorkflowReadOnlyPreflight,
+	runWorkflowWritePreflight,
 	runWorkflowAnalysis,
 	runWorkflowWrite,
 	WorkflowWriteRefusedError,
 	type WorkflowInputs
 } from '../src/import/catalog-migration-workflow'
+import { runInRolledBackTransaction } from '../src/import/catalog-slice-rollback'
+import { runCatalogImport } from '../src/import/catalog-importer'
+import { reconcileFamilies } from '../src/import/reconcile/family-reconciliation'
+import { reconcileSqlWith1c } from '../src/import/reconcile/sql-1c-reconciliation'
+import { classifyIdNomDuplicates } from '../src/import/reconcile/duplicate-id-nom'
 import { BackupFailedError, type SpawnFn as BackupSpawnFn } from '../src/import/catalog-migration-backup'
 import type { LegacyCatalogDump, LegacyProduct, LegacyBrand, LegacyCategory } from '../src/import/parsers/mysql-catalog'
 import { parseProductsFeed } from '../src/import/parsers/products-feed'
@@ -142,18 +151,102 @@ beforeEach(async () => {
 	await resetDatabase()
 })
 
-describe('runWorkflowPreflight (Requirement 3)', () => {
+/**
+ * Sprint 12B.10.1 regression fixture (point 6 of the fix): a REAL, distinct
+ * local Postgres database named `beauty_store_dev` - not a string literal
+ * stand-in - so the read-only preflight/analysis tests below prove they
+ * actually connect to and query a non-`beauty_store_test`-named database
+ * successfully, exactly reproducing the bug the user hit running
+ * `bun run import:legacy:catalog-workflow -- --brand-id=108` with
+ * DATABASE_URL pointed at their own local `beauty_store_dev`.
+ */
+let devDatabaseUrl: string
+let devDb: Database
+let devQueryClient: ReturnType<typeof postgres>
+
+beforeAll(async () => {
+	const testUrl = new URL(env.DATABASE_URL)
+	const devUrl = new URL(env.DATABASE_URL)
+	devUrl.pathname = '/beauty_store_dev'
+	devDatabaseUrl = devUrl.toString()
+
+	const admin = postgres(testUrl.toString())
+	const exists = await admin`select 1 from pg_database where datname = 'beauty_store_dev'`
+	if (exists.length === 0) {
+		await admin.unsafe('create database beauty_store_dev')
+	}
+	await admin.end()
+
+	devQueryClient = postgres(devDatabaseUrl)
+	const schema = await import('../src/db/schema')
+	devDb = drizzle(devQueryClient, { schema }) as Database
+	await migrate(devDb, { migrationsFolder: path.join(import.meta.dir, '../drizzle') })
+})
+
+afterAll(async () => {
+	await devQueryClient.end()
+})
+
+describe('runWorkflowReadOnlyPreflight (Requirement 1/3/7): must NOT require beauty_store_test', () => {
 	test('reports every check OK against the real isolated test database with a passing migration check', async () => {
-		const result = await runWorkflowPreflight(db, env.DATABASE_URL, async () => ({ ok: true, raw: "Everything's fine" }))
+		const result = await runWorkflowReadOnlyPreflight(db, env.DATABASE_URL, async () => ({ ok: true, raw: "Everything's fine" }))
 		expect(result.ok).toBe(true)
 		expect(result.safeTarget.ok).toBe(true)
 		expect(result.reachable.ok).toBe(true)
 		expect(result.migrationsCurrent.ok).toBe(true)
 	})
 
-	test('refuses before even checking reachability/migrations when the target is unsafe', async () => {
+	test('Sprint 12B.10.1 regression: succeeds against a REAL local database named "beauty_store_dev", not just "beauty_store_test"', async () => {
+		const result = await runWorkflowReadOnlyPreflight(devDb, devDatabaseUrl, async () => ({ ok: true, raw: "Everything's fine" }))
+		expect(result.ok).toBe(true)
+		expect(result.safeTarget.ok).toBe(true)
+		expect(result.safeTarget.detail).not.toContain('does not exactly match')
+		expect(result.reachable.ok).toBe(true)
+	})
+
+	test('still refuses a non-localhost DATABASE_URL (Requirement 7: never silently reads from an arbitrary remote/production host)', async () => {
 		let migrationsCheckRan = false
-		const result = await runWorkflowPreflight(db, 'postgres://localhost/production', async () => {
+		const result = await runWorkflowReadOnlyPreflight(db, 'postgres://example.com/beauty_store_dev', async () => {
+			migrationsCheckRan = true
+			return { ok: true, raw: '' }
+		})
+		expect(result.ok).toBe(false)
+		expect(result.safeTarget.ok).toBe(false)
+		expect(result.safeTarget.detail).toContain('allowlist')
+		expect(result.reachable.detail).toContain('Skipped')
+		expect(migrationsCheckRan).toBe(false)
+	})
+
+	test('reports a failing migration check without claiming the whole preflight passed', async () => {
+		const result = await runWorkflowReadOnlyPreflight(db, env.DATABASE_URL, async () => ({ ok: false, raw: 'drift detected' }))
+		expect(result.ok).toBe(false)
+		expect(result.migrationsCurrent.ok).toBe(false)
+		expect(result.migrationsCurrent.detail).toBe('drift detected')
+	})
+})
+
+describe('runWorkflowWritePreflight (Requirement 3/5): keeps the ORIGINAL strict beauty_store_test-only behavior', () => {
+	test('reports every check OK against the real isolated test database', async () => {
+		const result = await runWorkflowWritePreflight(db, env.DATABASE_URL, async () => ({ ok: true, raw: "Everything's fine" }))
+		expect(result.ok).toBe(true)
+		expect(result.safeTarget.ok).toBe(true)
+	})
+
+	test('Sprint 12B.10.1 regression pair: still refuses the same real "beauty_store_dev" database that read-only mode now accepts', async () => {
+		let migrationsCheckRan = false
+		const result = await runWorkflowWritePreflight(devDb, devDatabaseUrl, async () => {
+			migrationsCheckRan = true
+			return { ok: true, raw: '' }
+		})
+		expect(result.ok).toBe(false)
+		expect(result.safeTarget.ok).toBe(false)
+		expect(result.safeTarget.detail).toContain('does not exactly match')
+		expect(migrationsCheckRan).toBe(false)
+	})
+
+	test('refuses before even checking reachability/migrations when the host is unsafe', async () => {
+		let migrationsCheckRan = false
+		const result = await runWorkflowWritePreflight(db, 'postgres://localhost/production', async () => {
 			migrationsCheckRan = true
 			return { ok: true, raw: '' }
 		})
@@ -164,10 +257,57 @@ describe('runWorkflowPreflight (Requirement 3)', () => {
 	})
 
 	test('reports a failing migration check without claiming the whole preflight passed', async () => {
-		const result = await runWorkflowPreflight(db, env.DATABASE_URL, async () => ({ ok: false, raw: 'drift detected' }))
+		const result = await runWorkflowWritePreflight(db, env.DATABASE_URL, async () => ({ ok: false, raw: 'drift detected' }))
 		expect(result.ok).toBe(false)
 		expect(result.migrationsCurrent.ok).toBe(false)
 		expect(result.migrationsCurrent.detail).toBe('drift detected')
+	})
+})
+
+describe('Sprint 12B.10.1 regression: runWorkflowAnalysis itself against the real "beauty_store_dev" database', () => {
+	test('the exact reported command path (brand/product analysis against a non-test-named local DB) succeeds without UnsafeImportTargetError', async () => {
+		const report = await runWorkflowAnalysis(devDb, cleanStandaloneInputs())
+		expect(report.verdict).toBe('READY')
+		expect(report.products.totalConsidered).toBe(1)
+
+		// Still provably rolled back - the dev database is untouched afterward.
+		const { products } = await import('../src/db/schema/products')
+		const rows = await devDb.select().from(products)
+		expect(rows.length).toBe(0)
+	})
+})
+
+describe('Requirement 4: the rollback runWorkflowAnalysis depends on is structural, not conventional', () => {
+	test('a REAL write followed by a thrown (non-sentinel) error inside the same rolled-back transaction still leaves zero rows - proven on the actual helper runWorkflowAnalysis composes with three times over', async () => {
+		const inputs = cleanStandaloneInputs()
+		class InjectedFailureAfterWrite extends Error {}
+
+		const importInput = {
+			dump: inputs.dump,
+			oneCRecords: inputs.oneCRecords,
+			families: reconcileFamilies(inputs.dump, inputs.oneCRecords),
+			positions: reconcileSqlWith1c(inputs.dump, inputs.oneCRecords),
+			idNomDuplicates: classifyIdNomDuplicates(inputs.rawOneCRecords, 'ID_nom')
+		}
+
+		await expect(
+			runInRolledBackTransaction(db, async tx => {
+				// A real write that genuinely creates a row - exactly like
+				// runWorkflowAnalysis's dry-run-preview and
+				// post-import-checks-dry-run transactions perform internally.
+				const result = await runCatalogImport(tx, importInput, 'write')
+				expect(result.summary.productsCreated).toBe(1)
+				// Then something genuinely breaks partway through analysis - NOT the
+				// IntentionalRollback sentinel `runInRolledBackTransaction` throws
+				// internally. The point: rollback must not depend on which error
+				// fires, or on `fn` reaching its normal end.
+				throw new InjectedFailureAfterWrite('a real error after a real write')
+			})
+		).rejects.toThrow(InjectedFailureAfterWrite)
+
+		const { products } = await import('../src/db/schema/products')
+		const rows = await db.select().from(products)
+		expect(rows.length).toBe(0)
 	})
 })
 
