@@ -13,6 +13,7 @@ import {
 	runWorkflowWritePreflight,
 	runWorkflowAnalysis,
 	runWorkflowWrite,
+	resolveWorkflowDatabaseUrl,
 	WorkflowWriteRefusedError,
 	type WorkflowInputs
 } from '../src/import/catalog-migration-workflow'
@@ -451,6 +452,158 @@ describe('runWorkflowWrite (Requirement 5/6/7): the distinct, safety-gated write
 		await expect(
 			runWorkflowWrite(db, { ...clean, confirmSlice: wrongAnalysis.manifestHash, databaseUrl: env.DATABASE_URL, backupDir, backupOptions: { spawn: stubBackupSpawn } })
 		).rejects.toBeInstanceOf(WorkflowWriteRefusedError)
+		await rm(backupDir, { recursive: true, force: true })
+	})
+})
+
+/**
+ * Sprint 12B.11 regression: the exact bug the user hit next, after the
+ * Sprint 12B.10.1 fix. Fixing `assertSafeImportTarget`'s scope (read-only
+ * vs write) was not enough on its own - the CLI still always read
+ * `env.DATABASE_URL` for BOTH preflight validation AND the actual queries,
+ * so there was no way to point write mode at `beauty_store_test` without
+ * the developer manually overriding DATABASE_URL in their shell every time
+ * (exactly the friction Sprint 12B.10 was supposed to remove). These tests
+ * cover `resolveWorkflowDatabaseUrl`'s precedence in isolation (pure, no DB)
+ * - the CLI wiring itself (which also swaps to a SEPARATE `db`/`queryClient`
+ * bound to the resolved URL, never the app-wide singleton bound to
+ * `DATABASE_URL`) lives in cli/catalog-migration-workflow.ts and is not
+ * re-tested here per the existing project convention that files under
+ * import/cli/ run main() unconditionally at module load and are never
+ * imported by a test.
+ */
+describe('resolveWorkflowDatabaseUrl (Sprint 12B.11): env-based test-database targeting, no manual DATABASE_URL juggling', () => {
+	test('prefers CATALOG_TEST_DATABASE_URL over DATABASE_URL when both are set, for both read-only and write', () => {
+		for (const mode of ['read-only', 'write'] as const) {
+			const resolved = resolveWorkflowDatabaseUrl({
+				explicitFlag: null,
+				catalogTestDatabaseUrl: 'postgres://localhost/beauty_store_test',
+				fallbackDatabaseUrl: 'postgres://localhost/beauty_store_dev',
+				mode
+			})
+			expect(resolved.url).toBe('postgres://localhost/beauty_store_test')
+			expect(resolved.usedCatalogTestVar).toBe(true)
+			expect(resolved.warning).toBeNull()
+		}
+	})
+
+	test('an explicit --database-url flag always wins, even over CATALOG_TEST_DATABASE_URL', () => {
+		const resolved = resolveWorkflowDatabaseUrl({
+			explicitFlag: 'postgres://localhost/beauty_store_test_explicit',
+			catalogTestDatabaseUrl: 'postgres://localhost/beauty_store_test',
+			fallbackDatabaseUrl: 'postgres://localhost/beauty_store_dev',
+			mode: 'write'
+		})
+		expect(resolved.url).toBe('postgres://localhost/beauty_store_test_explicit')
+		expect(resolved.usedCatalogTestVar).toBe(false)
+	})
+
+	test('falls back to DATABASE_URL with no warning for read-only mode when CATALOG_TEST_DATABASE_URL is unset - this is the explicitly supported safe default', () => {
+		const resolved = resolveWorkflowDatabaseUrl({
+			explicitFlag: null,
+			catalogTestDatabaseUrl: undefined,
+			fallbackDatabaseUrl: 'postgres://localhost/beauty_store_dev',
+			mode: 'read-only'
+		})
+		expect(resolved.url).toBe('postgres://localhost/beauty_store_dev')
+		expect(resolved.usedCatalogTestVar).toBe(false)
+		expect(resolved.warning).toBeNull()
+	})
+
+	test('falls back to DATABASE_URL WITH a warning for write mode when CATALOG_TEST_DATABASE_URL is unset - assertSafeImportTarget still refuses it unless it happens to already be beauty_store_test', () => {
+		const resolved = resolveWorkflowDatabaseUrl({
+			explicitFlag: null,
+			catalogTestDatabaseUrl: undefined,
+			fallbackDatabaseUrl: 'postgres://localhost/beauty_store_dev',
+			mode: 'write'
+		})
+		expect(resolved.url).toBe('postgres://localhost/beauty_store_dev')
+		expect(resolved.warning).not.toBeNull()
+		expect(resolved.warning).toContain('CATALOG_TEST_DATABASE_URL')
+	})
+})
+
+describe('CATALOG_TEST_DATABASE_URL end-to-end (Sprint 12B.11): the real reported scenario', () => {
+	test('read-only analysis succeeds when CATALOG_TEST_DATABASE_URL-style targeting points at the real local "beauty_store_dev" database', async () => {
+		// Mirrors exactly what the CLI now does: resolveWorkflowDatabaseUrl picks
+		// this URL (standing in for CATALOG_TEST_DATABASE_URL being unset and
+		// DATABASE_URL happening to point at the dev db, or an explicit
+		// --database-url=<dev-url> override) and the read-only preflight/
+		// analysis run against it successfully - this is the exact command the
+		// user ran (`--brand-id=108` with DATABASE_URL pointed at
+		// beauty_store_dev) that originally failed with "does not exactly
+		// match beauty_store_test" before the Sprint 12B.10.1/12B.11 fixes.
+		const resolved = resolveWorkflowDatabaseUrl({
+			explicitFlag: null,
+			catalogTestDatabaseUrl: undefined,
+			fallbackDatabaseUrl: devDatabaseUrl,
+			mode: 'read-only'
+		})
+		expect(resolved.url).toBe(devDatabaseUrl)
+
+		const preflight = await runWorkflowReadOnlyPreflight(devDb, resolved.url, async () => ({ ok: true, raw: "Everything's fine" }))
+		expect(preflight.ok).toBe(true)
+
+		const report = await runWorkflowAnalysis(devDb, cleanStandaloneInputs())
+		expect(report.verdict).toBe('READY')
+		expect(report.manifestHash).not.toBe('')
+	})
+
+	test('write mode still refuses "beauty_store_dev" even when it arrives via the SAME resolution path a correctly-configured CATALOG_TEST_DATABASE_URL would use - the env var points write mode at the right db, it does not loosen the check', async () => {
+		// If a developer mis-set CATALOG_TEST_DATABASE_URL to their dev db by
+		// mistake, write mode must refuse exactly as if DATABASE_URL itself had
+		// been pointed there - resolveWorkflowDatabaseUrl only decides WHICH url
+		// is used, assertSafeImportTarget's strictness is completely unchanged.
+		const resolved = resolveWorkflowDatabaseUrl({
+			explicitFlag: null,
+			catalogTestDatabaseUrl: devDatabaseUrl,
+			fallbackDatabaseUrl: env.DATABASE_URL,
+			mode: 'write'
+		})
+		expect(resolved.url).toBe(devDatabaseUrl)
+		expect(resolved.usedCatalogTestVar).toBe(true)
+
+		const writePreflight = await runWorkflowWritePreflight(devDb, resolved.url, async () => ({ ok: true, raw: "Everything's fine" }))
+		expect(writePreflight.ok).toBe(false)
+		expect(writePreflight.safeTarget.detail).toContain('does not exactly match')
+
+		const inputs = cleanStandaloneInputs()
+		const backupDir = await mkdtemp(path.join(tmpdir(), 'catalog-workflow-envvar-test-'))
+		await expect(
+			runWorkflowWrite(devDb, { ...inputs, confirmSlice: 'anything', databaseUrl: resolved.url, backupDir })
+		).rejects.toBeInstanceOf(UnsafeImportTargetError)
+		await rm(backupDir, { recursive: true, force: true })
+	})
+
+	test('write mode succeeds when CATALOG_TEST_DATABASE_URL correctly points at beauty_store_test (the intended, correctly-configured case)', async () => {
+		const resolved = resolveWorkflowDatabaseUrl({
+			explicitFlag: null,
+			catalogTestDatabaseUrl: env.DATABASE_URL,
+			fallbackDatabaseUrl: devDatabaseUrl,
+			mode: 'write'
+		})
+		expect(resolved.url).toBe(env.DATABASE_URL)
+		expect(resolved.usedCatalogTestVar).toBe(true)
+
+		const inputs = cleanStandaloneInputs()
+		const analysis = await runWorkflowAnalysis(db, inputs)
+		expect(analysis.verdict).toBe('READY')
+		const backupDir = await mkdtemp(path.join(tmpdir(), 'catalog-workflow-envvar-test-'))
+		const stubBackupSpawn: BackupSpawnFn = async command => {
+			const outFile = command[3] as string
+			await Bun.write(outFile, `-- PostgreSQL database dump\n-- stub backup for Sprint 12B.11 tests\n${'x'.repeat(100)}\n`)
+			return { exitCode: 0, stderr: '' }
+		}
+
+		const result = await runWorkflowWrite(db, {
+			...inputs,
+			confirmSlice: analysis.manifestHash,
+			databaseUrl: resolved.url,
+			backupDir,
+			backupOptions: { spawn: stubBackupSpawn }
+		})
+		expect(result.firstRun.importResult.summary.productsCreated).toBe(1)
+		expect(result.idempotent).toBe(true)
 		await rm(backupDir, { recursive: true, force: true })
 	})
 })

@@ -35,7 +35,7 @@
  * mode refuses with a clear error rather than silently skipping the backup.
  */
 import path from 'node:path'
-import { db, queryClient } from '../../db/client'
+import { db as defaultDb, queryClient as defaultQueryClient, createDbClient } from '../../db/client'
 import { env } from '../../config/env'
 import { loadLegacyCatalogDump } from '../parsers/mysql-catalog'
 import { parseProductsFeed } from '../parsers/products-feed'
@@ -49,6 +49,8 @@ import {
 	runWorkflowAnalysis,
 	runWorkflowWrite,
 	renderWorkflowReportText,
+	renderWorkflowWriteReportText,
+	resolveWorkflowDatabaseUrl,
 	WorkflowWriteRefusedError,
 	type WorkflowSelection
 } from '../catalog-migration-workflow'
@@ -64,10 +66,11 @@ type Args = {
 	write: boolean
 	confirmSlice: string | null
 	json: boolean
+	databaseUrl: string | null
 }
 
 function parseArgs(argv: string[]): Args {
-	const args: Args = { sql: null, products: null, brandId: null, productIds: null, min: null, max: null, write: false, confirmSlice: null, json: false }
+	const args: Args = { sql: null, products: null, brandId: null, productIds: null, min: null, max: null, write: false, confirmSlice: null, json: false, databaseUrl: null }
 	for (const arg of argv) {
 		if (arg.startsWith('--sql=')) args.sql = arg.slice('--sql='.length)
 		else if (arg.startsWith('--products=')) args.products = arg.slice('--products='.length)
@@ -82,12 +85,18 @@ function parseArgs(argv: string[]): Args {
 		else if (arg === '--write') args.write = true
 		else if (arg.startsWith('--confirm-slice=')) args.confirmSlice = arg.slice('--confirm-slice='.length)
 		else if (arg === '--json') args.json = true
+		else if (arg.startsWith('--database-url=')) args.databaseUrl = arg.slice('--database-url='.length)
 	}
 	return args
 }
 
 const USAGE =
-	'Usage: bun run import:legacy:catalog-workflow -- (--brand-id=<id>|--product-ids=<ids>) [--sql=<path>] [--products=<path>] [--min=20] [--max=30] [--write --confirm-slice=<hash>] [--json]'
+	'Usage: bun run import:legacy:catalog-workflow -- (--brand-id=<id>|--product-ids=<ids>) [--sql=<path>] [--products=<path>] [--min=20] [--max=30] [--write --confirm-slice=<hash>] [--database-url=<url>] [--json]\n' +
+	'\n' +
+	'Database targeting (Sprint 12B.11): by default this reads CATALOG_TEST_DATABASE_URL from .env (falling back to DATABASE_URL if unset) for BOTH read-only analysis and --write, so a developer never has to manually export/override DATABASE_URL in their shell.\n' +
+	'Set CATALOG_TEST_DATABASE_URL in .env to your isolated beauty_store_test connection string; your regular DATABASE_URL can stay pointed at beauty_store_dev for everything else the app does.\n' +
+	'--database-url=<url> overrides both for this one invocation, taking precedence over CATALOG_TEST_DATABASE_URL.\n' +
+	'--write still always refuses any target that is not exactly beauty_store_test on localhost, regardless of which of the above supplied the URL.'
 
 /** Repo root, computed relative to this file's own location (apps/api/src/import/cli/) - used as a search root for local-file-discovery alongside process.cwd(), since a developer may invoke bun from either the repo root or apps/api. */
 const REPO_ROOT = path.resolve(import.meta.dir, '../../../../..')
@@ -103,6 +112,28 @@ async function main() {
 		process.exit(1)
 	}
 
+	// Sprint 12B.11: resolve which database URL this invocation actually
+	// targets - an explicit --database-url flag, then CATALOG_TEST_DATABASE_URL
+	// (so one .env var covers both read-only analysis and --write with zero
+	// manual DATABASE_URL juggling in the shell), then plain DATABASE_URL as
+	// a last resort (with a warning for write mode, since that may not be
+	// beauty_store_test - assertSafeImportTarget still refuses it either way).
+	const resolved = resolveWorkflowDatabaseUrl({
+		explicitFlag: args.databaseUrl,
+		catalogTestDatabaseUrl: env.CATALOG_TEST_DATABASE_URL,
+		fallbackDatabaseUrl: env.DATABASE_URL,
+		mode: args.write ? 'write' : 'read-only'
+	})
+	if (resolved.warning) console.error(`WARNING: ${resolved.warning}`)
+
+	// A SEPARATE client bound to the resolved URL, never the app-wide `db`
+	// singleton (which stays bound to DATABASE_URL at module load) - so the
+	// queries this run actually executes always go to the exact URL its own
+	// preflight check below just validated, never a validated-one/
+	// queried-another mismatch.
+	const usingDefaultClient = resolved.url === env.DATABASE_URL
+	const { db, queryClient } = usingDefaultClient ? { db: defaultDb, queryClient: defaultQueryClient } : createDbClient(resolved.url)
+
 	// Sprint 12B.10.1 fix: read-only analysis and write mode get DISTINCT
 	// preflight checks. Read-only mode only requires a local Postgres host
 	// (it never requires the exact `beauty_store_test` database name - every
@@ -110,9 +141,10 @@ async function main() {
 	// against a developer's own local dev database. Write mode keeps the
 	// original strict check (local host AND exact `beauty_store_test` name).
 	console.log(`=== Preflight checks (${args.write ? 'write mode' : 'read-only analysis'}) ===`)
+	console.log(`  Target: ${resolved.url}${resolved.usedCatalogTestVar ? ' (from CATALOG_TEST_DATABASE_URL)' : ''}`)
 	const preflight = args.write
-		? await runWorkflowWritePreflight(db, env.DATABASE_URL, () => checkDrizzleMigrations())
-		: await runWorkflowReadOnlyPreflight(db, env.DATABASE_URL, () => checkDrizzleMigrations())
+		? await runWorkflowWritePreflight(db, resolved.url, () => checkDrizzleMigrations())
+		: await runWorkflowReadOnlyPreflight(db, resolved.url, () => checkDrizzleMigrations())
 	console.log(`  Safe target: ${preflight.safeTarget.ok ? 'OK' : 'FAILED'} - ${preflight.safeTarget.detail}`)
 	console.log(`  Reachable: ${preflight.reachable.ok ? 'OK' : 'FAILED'} - ${preflight.reachable.detail}`)
 	console.log(`  Migrations current: ${preflight.migrationsCurrent.ok ? 'OK' : 'FAILED'} - ${preflight.migrationsCurrent.detail}`)
@@ -161,13 +193,17 @@ async function main() {
 	const workflowInputs = { dump, rawOneCRecords, oneCRecords, selection, priorQuarantine }
 
 	if (!args.write) {
-		const report = await runWorkflowAnalysis(db, workflowInputs)
-		if (args.json) {
-			console.log(JSON.stringify(report, null, 2))
-		} else {
-			console.log(`\n${renderWorkflowReportText(report)}`)
+		try {
+			const report = await runWorkflowAnalysis(db, workflowInputs)
+			if (args.json) {
+				console.log(JSON.stringify(report, null, 2))
+			} else {
+				console.log(`\n${renderWorkflowReportText(report)}`)
+			}
+			console.log('\nThis was READ-ONLY - nothing was written. Re-run with --write --confirm-slice=<hash above> to write exactly this selection into beauty_store_test.')
+		} finally {
+			if (!usingDefaultClient) await queryClient.end()
 		}
-		console.log('\nThis was READ-ONLY - nothing was written. Re-run with --write --confirm-slice=<hash above> to write exactly this selection into beauty_store_test.')
 		return
 	}
 
@@ -176,32 +212,27 @@ async function main() {
 		const result = await runWorkflowWrite(db, {
 			...workflowInputs,
 			confirmSlice: args.confirmSlice!,
-			databaseUrl: env.DATABASE_URL,
+			databaseUrl: resolved.url,
 			backupDir: path.join(REPO_ROOT, '.catalog-migration-backups')
 		})
-		console.log(`Backup created and validated: ${result.backup.path} (${result.backup.sizeBytes} bytes)`)
-		console.log('\n=== First write (brand/category bootstrap + product/variant import + checks, one transaction) ===')
-		console.log(JSON.stringify(result.firstRun.bootstrap.brandResult.summary, null, 2))
-		console.log(JSON.stringify(result.firstRun.bootstrap.categoryResult.summary, null, 2))
-		console.log(JSON.stringify(result.firstRun.importResult.summary, null, 2))
-		console.log(JSON.stringify(result.firstRun.checks, null, 2))
-		console.log('\n=== Idempotency re-run ===')
-		console.log(JSON.stringify(result.secondRun.bootstrap.brandResult.summary, null, 2))
-		console.log(JSON.stringify(result.secondRun.bootstrap.categoryResult.summary, null, 2))
-		console.log(JSON.stringify(result.secondRun.importResult.summary, null, 2))
-		console.log(JSON.stringify(result.secondRun.checks, null, 2))
-		console.log(`\nIdempotent: ${result.idempotent ? 'YES (0 created on re-run)' : 'NO - re-run created new products, investigate before trusting this import'}`)
+		if (args.json) {
+			console.log(JSON.stringify(result, null, 2))
+		} else {
+			console.log(`\n${renderWorkflowWriteReportText(result)}`)
+		}
 	} catch (error) {
 		if (error instanceof WorkflowWriteRefusedError) {
 			console.error(`\nWrite refused: ${error.message}`)
 			process.exit(1)
 		}
 		throw error
+	} finally {
+		if (!usingDefaultClient) await queryClient.end()
 	}
 }
 
 main()
-	.then(() => queryClient.end())
+	.then(() => defaultQueryClient.end())
 	.then(() => process.exit(0))
 	.catch(error => {
 		console.error('Catalog migration workflow failed:', error)

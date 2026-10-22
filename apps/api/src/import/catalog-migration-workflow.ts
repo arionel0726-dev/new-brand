@@ -195,6 +195,50 @@ export async function runWorkflowWritePreflight(
 	return runPreflightChecks(db, databaseUrl, checkMigrations, assertSafeImportTarget, 'DATABASE_URL points at the isolated local beauty_store_test database.')
 }
 
+export type ResolvedWorkflowDatabaseUrl = {
+	url: string
+	/** True when `catalogTestDatabaseUrl` (typically `CATALOG_TEST_DATABASE_URL`) was the source. */
+	usedCatalogTestVar: boolean
+	/** Non-null only when falling back to `fallbackDatabaseUrl` for a WRITE run - never for read-only, since read-only against the developer's own dev database is the explicitly supported, safe default. */
+	warning: string | null
+}
+
+/**
+ * Sprint 12B.11: precedence for which database URL a catalog-workflow CLI
+ * invocation actually targets - an explicit `--database-url` flag, then
+ * `CATALOG_TEST_DATABASE_URL` (so a developer sets ONE var once in their
+ * `.env`, alongside their normal `DATABASE_URL` which stays pointed at their
+ * regular dev database for everything else the app does, and every
+ * subsequent write-mode workflow invocation automatically targets the
+ * isolated `beauty_store_test` database with no manual DATABASE_URL
+ * override in the shell), then `fallbackDatabaseUrl` (plain `DATABASE_URL`).
+ * Falling back to plain `DATABASE_URL` for a WRITE run produces a `warning`
+ * - `assertSafeImportTarget` will still refuse it outright unless it happens
+ * to already be `beauty_store_test`, but the warning makes the reason
+ * legible rather than a bare refusal. No warning for read-only mode: running
+ * analysis against whatever `DATABASE_URL` is already configured for is the
+ * explicitly supported, safe default from Sprint 12B.10.1 (read-only never
+ * commits, so it is safe against a developer's own dev database).
+ */
+export function resolveWorkflowDatabaseUrl(options: {
+	explicitFlag: string | null
+	catalogTestDatabaseUrl: string | undefined
+	fallbackDatabaseUrl: string
+	mode: 'read-only' | 'write'
+}): ResolvedWorkflowDatabaseUrl {
+	if (options.explicitFlag) {
+		return { url: options.explicitFlag, usedCatalogTestVar: false, warning: null }
+	}
+	if (options.catalogTestDatabaseUrl) {
+		return { url: options.catalogTestDatabaseUrl, usedCatalogTestVar: true, warning: null }
+	}
+	const warning =
+		options.mode === 'write'
+			? 'CATALOG_TEST_DATABASE_URL is not set - falling back to DATABASE_URL for this write. Set CATALOG_TEST_DATABASE_URL in your .env to the isolated beauty_store_test database so write mode never depends on what DATABASE_URL happens to point at.'
+			: null
+	return { url: options.fallbackDatabaseUrl, usedCatalogTestVar: false, warning }
+}
+
 function resolveSelectionIds(inputs: WorkflowInputs, representativeSelection: RepresentativeSliceResult | null): number[] {
 	if (inputs.selection.kind === 'legacyProductIds') {
 		return resolveLegacyProductIds(inputs.dump, { kind: 'legacyProductIds', legacyProductIds: inputs.selection.legacyProductIds })
@@ -471,6 +515,45 @@ export function renderWorkflowReportText(report: WorkflowReport): string {
 	}
 	lines.push('')
 	lines.push(`Manifest hash (for --confirm-slice on a controlled write): ${report.manifestHash}`)
+	return lines.join('\n')
+}
+
+/**
+ * Requirement 6 (report format): a genuinely readable, human-facing summary
+ * of a completed write - products/variants written, brand/category link
+ * resolution, and the idempotency re-run's created/updated counts - instead
+ * of the raw JSON blocks the CLI previously printed for each sub-step.
+ * `--json` mode should print `JSON.stringify(result, null, 2)` instead.
+ */
+export function renderWorkflowWriteReportText(result: WorkflowWriteResult): string {
+	const lines: string[] = []
+	lines.push('=== VIZAJE-NICA catalog migration workflow: write summary ===')
+	lines.push(`Backup: ${result.backup.path} (${result.backup.sizeBytes} bytes)`)
+	lines.push('')
+	lines.push('First run (brand/category bootstrap + product/variant import + checks, one transaction):')
+	lines.push(
+		`  Brands bootstrapped: ${result.firstRun.bootstrap.brandResult.summary.created} created, ${result.firstRun.bootstrap.brandResult.summary.updated} updated, ${result.firstRun.bootstrap.brandResult.summary.skipped} skipped`
+	)
+	lines.push(
+		`  Categories bootstrapped: ${result.firstRun.bootstrap.categoryResult.summary.created} created, ${result.firstRun.bootstrap.categoryResult.summary.updated} updated, ${result.firstRun.bootstrap.categoryResult.summary.skipped} skipped`
+	)
+	lines.push(
+		`  Products: ${result.firstRun.importResult.summary.productsCreated} created, ${result.firstRun.importResult.summary.productsUpdated} updated`
+	)
+	lines.push(`  Variants written: ${result.firstRun.importResult.summary.variantsWritten}`)
+	lines.push(
+		`  Brand/category links: ${result.firstRun.checks.categoryBrandLinks.missingBrandLinks} missing brand link(s), ${result.firstRun.checks.categoryBrandLinks.missingCategoryLinks} missing category link(s) after bootstrap`
+	)
+	const firstRunFailures = Object.entries(result.firstRun.checks).filter(([, check]) => !(check as { ok: boolean }).ok)
+	lines.push(`  Post-import checks: ${firstRunFailures.length === 0 ? 'all 6 passed' : `${firstRunFailures.length} FAILED (${firstRunFailures.map(([name]) => name).join(', ')})`}`)
+	lines.push('')
+	lines.push('Idempotency re-run (identical write, same slice, against the now-committed state):')
+	lines.push(
+		`  Products: ${result.secondRun.importResult.summary.productsCreated} created, ${result.secondRun.importResult.summary.productsUpdated} updated`
+	)
+	lines.push(`  Variants written: ${result.secondRun.importResult.summary.variantsWritten}`)
+	lines.push('')
+	lines.push(`IDEMPOTENT: ${result.idempotent ? 'YES (0 products created on re-run)' : 'NO - re-run created new products, investigate before trusting this import'}`)
 	return lines.join('\n')
 }
 

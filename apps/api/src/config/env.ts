@@ -4,6 +4,16 @@ const envSchema = z.object({
 	NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 	PORT: z.coerce.number().int().positive().default(3001),
 	DATABASE_URL: z.url(),
+	// Sprint 12B.11: the catalog-workflow CLI's WRITE path (and, when set,
+	// its read-only analysis path too, so the preview reflects the same
+	// database a matching write will target) prefers this over DATABASE_URL
+	// when present, so a developer's regular DATABASE_URL can stay pointed
+	// at their own local dev database (e.g. `beauty_store_dev`) for
+	// everything else the app does, while catalog migration write/analysis
+	// runs always target the isolated `beauty_store_test` database without
+	// any manual DATABASE_URL override in the shell. Never used for anything
+	// outside the catalog-workflow CLI.
+	CATALOG_TEST_DATABASE_URL: z.url().optional(),
 	MEILI_HOST: z.url(),
 	MEILI_MASTER_KEY: z.string().min(1),
 	WEB_ORIGIN: z.url().default('http://localhost:3000'),
