@@ -29,7 +29,7 @@ export function SheetContent({ side = 'bottom', title, hideTitle, className, chi
 				className={cn(
 					'fixed z-50 flex flex-col bg-white outline-none transition-transform duration-300 ease-out',
 					side === 'bottom' &&
-						'inset-x-0 bottom-0 max-h-[85dvh] rounded-t-2xl border-t border-border pb-[env(safe-area-inset-bottom)] data-[starting-style]:translate-y-full data-[ending-style]:translate-y-full',
+						'inset-x-0 bottom-0 max-h-[85dvh] border-t border-border pb-[env(safe-area-inset-bottom)] data-[starting-style]:translate-y-full data-[ending-style]:translate-y-full',
 					side === 'left' &&
 						'inset-y-0 left-0 h-dvh w-[min(22rem,88vw)] data-[starting-style]:-translate-x-full data-[ending-style]:-translate-x-full',
 					className
@@ -41,7 +41,7 @@ export function SheetContent({ side = 'bottom', title, hideTitle, className, chi
 					<Dialog.Title className={cn('text-base font-medium text-ink', hideTitle && 'sr-only')}>{title}</Dialog.Title>
 					<Dialog.Close
 						aria-label="Close"
-						className="-m-2 flex size-9 items-center justify-center rounded-full text-ink transition-colors hover:bg-surface-soft"
+						className="-m-2 flex size-9 items-center justify-center text-ink transition-colors hover:bg-surface-soft"
 					>
 						<X className="size-5" aria-hidden />
 					</Dialog.Close>

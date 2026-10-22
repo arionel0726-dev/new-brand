@@ -21,7 +21,7 @@ export default async function StoresPage({ params }: PageProps<'/[locale]/stores
 		<div className="px-4 py-6 sm:px-6">
 			<h1 className="text-xl font-medium text-ink">{dict.stores.title}</h1>
 
-			<div className="mt-4 flex items-start gap-2 rounded-md bg-surface-soft px-3.5 py-3 text-sm text-ink-muted">
+			<div className="mt-4 flex items-start gap-2 bg-surface-soft px-3.5 py-3 text-sm text-ink-muted">
 				<AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
 				<p>{dict.stores.devDataNotice}</p>
 			</div>

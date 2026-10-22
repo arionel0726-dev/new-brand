@@ -41,7 +41,7 @@ export function ProductCard({ product, brand, locale, dict, className }: Product
 				className
 			)}
 		>
-			<div className="relative aspect-[4/5] w-full overflow-hidden bg-surface-soft">
+			<div className="relative aspect-[4/5] w-full overflow-hidden bg-image-surface">
 				<Image
 					src={product.images[0]}
 					alt={name}
@@ -50,9 +50,9 @@ export function ProductCard({ product, brand, locale, dict, className }: Product
 					className="object-cover transition-transform duration-500 group-hover:scale-[1.03]"
 				/>
 				<div className="absolute left-2 top-2 flex flex-col gap-1">
-					{product.isNew && <Badge label={dict.product.new} />}
-					{product.isHit && !product.isNew && <Badge label={dict.product.hit} />}
-					{hasDiscount && discountPercent && <Badge label={`-${discountPercent}%`} tone="accent" />}
+					{product.isNew && <Badge label={dict.product.new} tone="new" />}
+					{product.isHit && <Badge label={dict.product.hit} tone="hit" />}
+					{hasDiscount && discountPercent && <Badge label={`-${discountPercent}%`} tone="sale" />}
 				</div>
 				{!inStock && (
 					<div className="absolute inset-x-0 bottom-0 bg-white/90 px-2 py-1.5 text-center text-xs text-ink-muted">
@@ -80,12 +80,15 @@ export function ProductCard({ product, brand, locale, dict, className }: Product
 	)
 }
 
-function Badge({ label, tone = 'ink' }: { label: string; tone?: 'ink' | 'accent' }) {
+function Badge({ label, tone = 'ink' }: { label: string; tone?: 'ink' | 'new' | 'hit' | 'sale' }) {
 	return (
 		<span
 			className={cn(
-				'rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white',
-				tone === 'ink' ? 'bg-ink' : 'bg-brand-accent'
+				'px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide',
+				tone === 'ink' && 'bg-ink text-white',
+				tone === 'new' && 'bg-status-new text-ink',
+				tone === 'hit' && 'bg-status-hit text-ink',
+				tone === 'sale' && 'bg-promo text-white'
 			)}
 		>
 			{label}

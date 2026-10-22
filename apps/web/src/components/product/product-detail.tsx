@@ -158,7 +158,7 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 							aria-pressed={isWishlisted}
 							onClick={() => setIsWishlisted(value => !value)}
 							className={cn(
-								'flex size-12 shrink-0 items-center justify-center rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent',
+								'flex size-[60px] shrink-0 items-center justify-center border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent',
 								isWishlisted ? 'border-brand-accent bg-brand-accent text-white' : 'border-border text-ink hover:border-ink'
 							)}
 						>
@@ -171,7 +171,7 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 						{variant.compareAtPriceBani && (
 							<span className="pb-0.5 text-sm text-ink-muted line-through">{formatMoney(variant.compareAtPriceBani, locale)}</span>
 						)}
-						{discountPercent && <span className="mb-0.5 rounded-full bg-brand-accent px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-white">-{discountPercent}%</span>}
+						{discountPercent && <span className="mb-0.5 bg-promo px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-white">-{discountPercent}%</span>}
 					</div>
 
 					<div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
@@ -200,7 +200,7 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 											aria-pressed={selected}
 											onClick={() => selectVariant(item.id)}
 											className={cn(
-												'relative min-h-12 min-w-20 rounded-sm border px-4 py-3 text-left text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent',
+								'relative min-h-12 min-w-20 border px-4 py-3 text-left text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent',
 												selected ? 'border-ink bg-ink text-white' : 'border-border text-ink hover:border-ink',
 												!available && 'text-ink-muted line-through'
 											)}
@@ -219,7 +219,7 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 							type="button"
 							disabled={!inStock}
 							onClick={handleAddToCart}
-							className="flex min-h-14 items-center justify-center gap-2 rounded-sm bg-ink px-5 text-sm font-medium text-white transition-colors hover:bg-brand-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent disabled:cursor-not-allowed disabled:bg-surface-soft disabled:text-ink-muted"
+							className="flex min-h-[50px] items-center justify-center gap-2 bg-ink px-5 text-[11px] font-medium uppercase tracking-[0.14em] text-white transition-colors hover:bg-brand-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent disabled:cursor-not-allowed disabled:bg-surface-soft disabled:text-ink-muted"
 						>
 							<ShoppingBag className="size-4" aria-hidden />
 							{added ? dict.product.addedToCart : inStock ? dict.product.addToCart : dict.product.outOfStock}
@@ -228,7 +228,7 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 							type="button"
 							disabled={!inStock}
 							onClick={() => setIsQuickBuyOpen(true)}
-							className="min-h-14 rounded-sm border border-ink px-5 text-sm font-medium text-ink transition-colors hover:bg-surface-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent disabled:cursor-not-allowed disabled:border-border disabled:text-ink-muted"
+							className="min-h-[50px] border border-ink px-5 text-[11px] font-medium uppercase tracking-[0.14em] text-ink transition-colors hover:bg-surface-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent disabled:cursor-not-allowed disabled:border-border disabled:text-ink-muted"
 						>
 							{dict.product.oneClick}
 						</button>
@@ -270,7 +270,7 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 						type="button"
 						disabled={!inStock}
 						onClick={handleAddToCart}
-						className="flex min-h-12 shrink-0 items-center justify-center gap-2 rounded-sm bg-ink px-5 text-sm font-medium text-white disabled:bg-surface-soft disabled:text-ink-muted"
+						className="flex min-h-[50px] shrink-0 items-center justify-center gap-2 bg-ink px-5 text-[11px] font-medium uppercase tracking-[0.14em] text-white disabled:bg-surface-soft disabled:text-ink-muted"
 					>
 						<ShoppingBag className="size-4" aria-hidden />
 						{added ? dict.product.addedToCart : dict.product.addToCart}
@@ -280,13 +280,13 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 
 			{isQuickBuyOpen && (
 				<div className="fixed inset-0 z-50 flex items-end justify-center bg-ink/40 p-4 sm:items-center" role="dialog" aria-modal="true" aria-labelledby="quick-buy-title">
-					<div className="w-full max-w-md rounded-sm bg-white p-6 shadow-2xl sm:p-8">
+					<div className="w-full max-w-md bg-white p-6 shadow-2xl sm:p-8">
 						<div className="flex items-start justify-between gap-4">
 							<div>
 								<p className="text-[11px] font-medium uppercase tracking-[0.2em] text-brand-accent">{dict.brand.name}</p>
 								<h2 id="quick-buy-title" className="mt-3 text-2xl font-medium tracking-tight text-ink">{dict.product.oneClickTitle}</h2>
 							</div>
-							<button type="button" onClick={() => setIsQuickBuyOpen(false)} aria-label={dict.product.close} className="flex size-10 items-center justify-center rounded-full border border-border text-ink">
+							<button type="button" onClick={() => setIsQuickBuyOpen(false)} aria-label={dict.product.close} className="flex size-10 items-center justify-center border border-border text-ink">
 								<X className="size-4" aria-hidden />
 							</button>
 						</div>
@@ -300,7 +300,7 @@ export function ProductDetail({ product, brand, locale, dict, editorial }: Produ
 								<p className="mt-1 text-ink-muted">{formatMoney(variant.priceBani, locale)}</p>
 							</div>
 						</div>
-						<button type="button" onClick={() => setIsQuickBuyOpen(false)} className="mt-6 min-h-12 w-full rounded-sm bg-ink px-4 text-sm font-medium text-white transition-colors hover:bg-brand-accent">
+						<button type="button" onClick={() => setIsQuickBuyOpen(false)} className="mt-6 min-h-[50px] w-full bg-ink px-4 text-[11px] font-medium uppercase tracking-[0.14em] text-white transition-colors hover:bg-brand-accent">
 							{dict.product.close}
 						</button>
 					</div>
@@ -339,13 +339,13 @@ function Gallery({
 						<Thumbnail key={src} src={src} index={index} selectedImageIndex={selectedImageIndex} name={name} setSelectedImageIndex={setSelectedImageIndex} />
 					))}
 				</div>
-				<div className="relative min-w-0 flex-1 overflow-hidden bg-surface-soft">
+				<div className="relative min-w-0 flex-1 overflow-hidden bg-image-surface">
 					<div className="relative aspect-[4/5] w-full">
 						<Image src={image} alt={name} fill priority sizes="(min-width: 1024px) 54vw, 100vw" className="object-cover" />
 					</div>
 					<div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-4 sm:p-5">
 						<span className="bg-white/90 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-ink">{dict.product.galleryLabel}</span>
-						<button type="button" onClick={() => setIsFullscreen(true)} aria-label={dict.product.openImage} className="pointer-events-auto flex size-10 items-center justify-center rounded-full bg-white/90 text-ink transition-colors hover:bg-white">
+					<button type="button" onClick={() => setIsFullscreen(true)} aria-label={dict.product.openImage} className="pointer-events-auto flex size-10 items-center justify-center bg-white/90 text-ink transition-colors hover:bg-white">
 							<Expand className="size-4" aria-hidden />
 						</button>
 					</div>
@@ -389,7 +389,7 @@ function Thumbnail({ src, index, selectedImageIndex, name, setSelectedImageIndex
 			aria-label={`${name} ${index + 1}`}
 			aria-pressed={index === selectedImageIndex}
 			onClick={() => setSelectedImageIndex(index)}
-			className={cn('relative size-16 shrink-0 overflow-hidden bg-surface-soft transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent sm:size-20 lg:size-16', index === selectedImageIndex ? 'opacity-100 ring-1 ring-ink ring-offset-2' : 'opacity-60 hover:opacity-100')}
+			className={cn('relative size-16 shrink-0 overflow-hidden bg-image-surface transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-accent sm:size-20 lg:size-16', index === selectedImageIndex ? 'opacity-100 ring-1 ring-ink ring-offset-2' : 'opacity-60 hover:opacity-100')}
 		>
 			<Image src={src} alt="" fill sizes="80px" className="object-cover" />
 		</button>
@@ -398,7 +398,7 @@ function Thumbnail({ src, index, selectedImageIndex, name, setSelectedImageIndex
 
 function GalleryButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
 	return (
-		<button type="button" aria-label={label} onClick={onClick} className="flex size-10 items-center justify-center rounded-full bg-white/90 text-ink transition-colors hover:bg-white">
+		<button type="button" aria-label={label} onClick={onClick} className="flex size-10 items-center justify-center bg-white/90 text-ink transition-colors hover:bg-white">
 			{children}
 		</button>
 	)
@@ -430,7 +430,7 @@ function EmptyProductState({ dict, locale }: { dict: Dictionary; locale: Locale 
 			<p className="text-[11px] font-medium uppercase tracking-[0.2em] text-brand-accent">{dict.brand.name}</p>
 			<h1 className="mt-4 text-3xl font-medium tracking-tight text-ink">{dict.product.emptyTitle}</h1>
 			<p className="mt-3 text-sm leading-6 text-ink-muted">{dict.product.emptyText}</p>
-			<Link href={`/${locale}/catalog`} className="mt-7 inline-flex min-h-12 items-center rounded-sm bg-ink px-5 text-sm font-medium text-white">
+		<Link href={`/${locale}/catalog`} className="mt-7 inline-flex min-h-[50px] items-center bg-ink px-5 text-[11px] font-medium uppercase tracking-[0.14em] text-white">
 				{dict.product.backToCatalog}
 			</Link>
 		</div>

@@ -56,7 +56,7 @@ function DrawerLink({ href, label, indent }: { href: string; label: string; inde
 	return (
 		<Link
 			href={href}
-			className={`flex items-center justify-between rounded-lg px-3 py-3 text-[15px] text-ink transition-colors active:bg-surface-soft ${indent ? 'pl-6 text-ink-muted' : ''}`}
+			className={`flex items-center justify-between px-3 py-3 text-[15px] text-ink transition-colors active:bg-surface-soft ${indent ? 'pl-6 text-ink-muted' : ''}`}
 		>
 			{label}
 			{!indent && <ChevronRight className="size-4 text-ink-muted" aria-hidden />}

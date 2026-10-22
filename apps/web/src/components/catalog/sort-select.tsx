@@ -22,7 +22,7 @@ export function SortSelect({ dict }: { dict: Dictionary }) {
 			<select
 				defaultValue={searchParams.get('sort') ?? ''}
 				onChange={e => onChange(e.target.value)}
-				className="rounded-md border border-border bg-white px-2.5 py-2 text-sm text-ink"
+				className="border border-border bg-white px-2.5 py-2 text-sm text-ink"
 			>
 				<option value="">{dict.catalog.sortNewest}</option>
 				<option value={'price-asc' satisfies SortOption}>{dict.catalog.sortPriceAsc}</option>

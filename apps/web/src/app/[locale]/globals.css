@@ -11,6 +11,11 @@
   --color-ink-muted: var(--ink-muted);
   --color-surface-soft: var(--surface-soft);
   --color-brand-accent: var(--brand-accent);
+  --color-promo: var(--promo);
+  --color-status-hit: var(--status-hit);
+  --color-status-new: var(--status-new);
+  --color-image-surface: var(--image-surface);
+  --color-footer: var(--footer);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-geist-mono);
   --font-heading: var(--font-sans);
@@ -54,10 +59,15 @@
 
 :root {
   /* VIZAJE-NICA V2 brand tokens (Sprint 11) */
-  --ink: #111111;
-  --ink-muted: #777777;
-  --surface-soft: #f2f2f2;
+  --ink: #000000;
+  --ink-muted: #666666;
+  --surface-soft: #f0f0f0;
   --brand-accent: #ac8c75;
+  --promo: #ff1686;
+  --status-hit: #f5f500;
+  --status-new: #c6ff00;
+  --image-surface: #eeeeee;
+  --footer: #1a1a1a;
 
   --background: #ffffff;
   --foreground: var(--ink);
@@ -74,15 +84,15 @@
   --accent: var(--brand-accent);
   --accent-foreground: #ffffff;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: #e3e3e3;
-  --input: #e3e3e3;
+  --border: #e9e9e9;
+  --input: #e9e9e9;
   --ring: var(--brand-accent);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
+  --radius: 0px;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);

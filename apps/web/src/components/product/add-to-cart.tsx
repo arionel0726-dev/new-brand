@@ -45,7 +45,7 @@ export function AddToCart({ product, locale, dict }: AddToCartProps) {
 							setVariantId(e.target.value)
 							setAdded(false)
 						}}
-						className="rounded-md border border-border px-3 py-2.5 text-sm text-ink"
+						className="border border-border px-3 py-2.5 text-sm text-ink"
 					>
 						{product.variants.map(v => (
 							<option key={v.id} value={v.id} disabled={v.quantityOnHand === 0}>
@@ -67,14 +67,14 @@ export function AddToCart({ product, locale, dict }: AddToCartProps) {
 						add(product.id, variant.id)
 						setAdded(true)
 					}}
-					className="flex-1 rounded-md bg-ink px-4 py-3.5 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+						className="flex-1 bg-ink px-4 py-3.5 text-[11px] font-medium uppercase tracking-[0.14em] text-white transition-opacity disabled:opacity-40"
 				>
 					{added ? dict.product.addedToCart : dict.product.addToCart}
 				</button>
 				<button
 					type="button"
 					aria-label={dict.product.wishlistAdd}
-					className="flex size-12 items-center justify-center rounded-md border border-border text-ink"
+						className="flex size-[60px] items-center justify-center border border-border text-ink"
 				>
 					<Heart className="size-5" aria-hidden />
 				</button>

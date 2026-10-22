@@ -22,7 +22,7 @@ export function MobileCategoryMenu({ locale, dict }: MobileCategoryMenuProps) {
 					<span className="min-w-0 flex-1 truncate">{copy.brandSearch}</span>
 					<Search className="size-8 shrink-0 stroke-[1.5] text-ink" aria-hidden />
 					<span className="flex size-10 shrink-0 items-center justify-center text-ink" aria-hidden>
-						<span className="block size-6 rounded-[5px] border-2 border-ink" />
+						<span className="block size-6 border-2 border-ink" />
 					</span>
 				</Link>
 			</section>
@@ -86,7 +86,7 @@ function CategoryVisual({ visual }: { visual: MobileCategoryMenuItem['visual'] }
 	}
 
 	if (visual === 'flower') return <Flower2 className="size-10 shrink-0 stroke-[1.5] text-ink-muted sm:size-12" aria-hidden />
-	if (visual === 'tamagotchi') return <Sparkles className="size-10 shrink-0 text-brand-accent sm:size-12" aria-hidden />
-	if (visual === 'gift') return <Gift className="size-10 shrink-0 stroke-[1.5] text-brand-accent sm:size-12" aria-hidden />
-	return <Percent className="size-10 shrink-0 stroke-[2] text-brand-accent sm:size-12" aria-hidden />
+	if (visual === 'tamagotchi') return <Sparkles className="size-10 shrink-0 text-status-new sm:size-12" aria-hidden />
+	if (visual === 'gift') return <Gift className="size-10 shrink-0 stroke-[1.5] text-promo sm:size-12" aria-hidden />
+	return <Percent className="size-10 shrink-0 stroke-[2] text-promo sm:size-12" aria-hidden />
 }

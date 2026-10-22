@@ -36,7 +36,7 @@ export default async function BrandsPage({ params, searchParams }: PageProps<'/[
 					name="q"
 					defaultValue={query}
 					placeholder={dict.brands.searchPlaceholder}
-					className="w-full rounded-md border border-border px-3.5 py-2.5 text-sm text-ink"
+					className="w-full border border-border px-3.5 py-2.5 text-sm text-ink"
 				/>
 			</form>
 

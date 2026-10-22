@@ -16,7 +16,7 @@ const COPYRIGHT_YEAR = 2026
  */
 export function Footer({ locale, dict }: FooterProps) {
 	return (
-		<footer className="border-t border-border bg-white">
+		<footer className="border-t border-footer bg-footer text-white">
 			<div className="mx-auto grid max-w-6xl grid-cols-2 gap-8 px-5 py-10 sm:grid-cols-4 sm:px-6 sm:py-14">
 				<FooterColumn title={dict.footer.company}>
 					<FooterLink href={`/${locale}`} label={dict.footer.aboutUs} />
@@ -28,16 +28,16 @@ export function Footer({ locale, dict }: FooterProps) {
 					<FooterLink href={`/${locale}/support/returns`} label={dict.footer.returns} />
 				</FooterColumn>
 				<FooterColumn title={dict.footer.contacts}>
-					<span className="text-sm text-ink-muted">{dict.footer.contactsPlaceholder}</span>
+					<span className="text-sm text-white/60">{dict.footer.contactsPlaceholder}</span>
 				</FooterColumn>
 				<FooterColumn title={dict.footer.legal}>
 					<FooterLink href={`/${locale}/legal/terms`} label={dict.footer.terms} />
 					<FooterLink href={`/${locale}/legal/privacy`} label={dict.footer.privacy} />
 				</FooterColumn>
 			</div>
-			<div className="border-t border-border px-5 py-5 sm:px-6">
-				<p className="text-xs text-ink-muted">{dict.footer.socialPlaceholder}</p>
-				<p className="mt-3 text-xs text-ink-muted">
+			<div className="border-t border-white/15 px-5 py-5 sm:px-6">
+				<p className="text-xs text-white/60">{dict.footer.socialPlaceholder}</p>
+				<p className="mt-3 text-xs text-white/60">
 					{/* Fixed, not new Date() - cacheComponents prerendering forbids a live clock read here; a request-time footer isn't worth losing static rendering for. */}
 					© {COPYRIGHT_YEAR} {dict.brand.name}. {dict.footer.rights}.
 				</p>
@@ -49,7 +49,7 @@ export function Footer({ locale, dict }: FooterProps) {
 function FooterColumn({ title, children }: { title: string; children: React.ReactNode }) {
 	return (
 		<div className="flex flex-col gap-2.5">
-			<h2 className="text-xs font-medium uppercase tracking-wide text-ink">{title}</h2>
+			<h2 className="text-xs font-medium uppercase tracking-wide text-white">{title}</h2>
 			<div className="flex flex-col gap-2">{children}</div>
 		</div>
 	)
@@ -57,7 +57,7 @@ function FooterColumn({ title, children }: { title: string; children: React.Reac
 
 function FooterLink({ href, label }: { href: string; label: string }) {
 	return (
-		<Link href={href} className="text-sm text-ink-muted transition-colors hover:text-ink">
+		<Link href={href} className="text-sm text-white/70 transition-colors hover:text-white">
 			{label}
 		</Link>
 	)
