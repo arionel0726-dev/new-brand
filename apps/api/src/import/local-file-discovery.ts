@@ -20,10 +20,12 @@ export type DiscoveryResult =
 	| { status: 'not_found'; searchedCandidates: string[] }
 
 /**
- * Candidate paths relative to a search root, checked in order. These are the
- * two real paths the user has already confirmed (Sprint 12B.9: `docs/legacy-reference/vizaje_catalog_only.sql`,
- * `data/import/products.json`), plus reasonable siblings/variants worth
- * checking automatically before asking the user to type a path by hand.
+ * Candidate paths relative to a search root, checked in order. These include
+ * the real paths the user has already confirmed on their machines (Sprint
+ * 12B.9: `docs/legacy-reference/vizaje_catalog_only.sql`, `data/import/products.json`;
+ * Sprint 12B.10.2, macOS: `docs/import/products.json`), plus reasonable
+ * siblings/variants worth checking automatically before asking the user to
+ * type a path by hand.
  */
 export const DEFAULT_SQL_DUMP_CANDIDATES: readonly string[] = [
 	'docs/legacy-reference/vizaje_catalog_only.sql',
@@ -36,6 +38,7 @@ export const DEFAULT_SQL_DUMP_CANDIDATES: readonly string[] = [
 
 export const DEFAULT_PRODUCTS_FEED_CANDIDATES: readonly string[] = [
 	'data/import/products.json',
+	'docs/import/products.json',
 	'data/legacy/products.json',
 	'import/products.json',
 	'docs/legacy-reference/products.json'

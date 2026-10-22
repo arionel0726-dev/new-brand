@@ -74,6 +74,33 @@ describe('discoverFile', () => {
 		expect(result.status).toBe('found')
 		await rm(root, { recursive: true, force: true })
 	})
+
+	test('Sprint 12B.10.2: discoverProductsFeed also finds docs/import/products.json - the real macOS path the user has', async () => {
+		const root = await makeRoot()
+		await mkdir(path.join(root, 'docs/import'), { recursive: true })
+		await writeFile(path.join(root, 'docs/import/products.json'), '[]')
+		const result = discoverProductsFeed([root])
+		expect(result.status).toBe('found')
+		if (result.status === 'found') {
+			expect(result.file.absolutePath).toBe(path.join(root, 'docs/import/products.json'))
+			expect(result.file.matchedCandidate).toBe('docs/import/products.json')
+		}
+		await rm(root, { recursive: true, force: true })
+	})
+
+	test('Sprint 12B.10.2: when BOTH data/import/products.json and docs/import/products.json exist, discovery reports ambiguous rather than silently picking one', async () => {
+		const root = await makeRoot()
+		await mkdir(path.join(root, 'data/import'), { recursive: true })
+		await mkdir(path.join(root, 'docs/import'), { recursive: true })
+		await writeFile(path.join(root, 'data/import/products.json'), '[]')
+		await writeFile(path.join(root, 'docs/import/products.json'), '[]')
+		const result = discoverProductsFeed([root])
+		expect(result.status).toBe('ambiguous')
+		if (result.status === 'ambiguous') {
+			expect(result.candidates.length).toBe(2)
+		}
+		await rm(root, { recursive: true, force: true })
+	})
 })
 
 describe('resolveSqlPath / resolveProductsPath', () => {

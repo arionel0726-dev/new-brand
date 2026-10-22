@@ -31,7 +31,7 @@ import { selectBrandRepresentativeSlice, type RepresentativeSliceResult } from '
 import { buildCatalogSlice, resolveLegacyProductIds, UnknownLegacyProductIdError } from './catalog-slice'
 import { buildSlicePreview, computeSliceManifestHash, assertSliceConfirmed, SliceConfirmationError, type SlicePreview, type SliceManifestInputs } from './catalog-slice-preview'
 import { runInRolledBackTransaction } from './catalog-slice-rollback'
-import { runAtomicSliceWrite, PostImportChecksFailedError, type SliceWriteChecks } from './catalog-slice-write'
+import { runAtomicSliceWriteWithBootstrap, PostImportChecksFailedError, type SliceWriteChecks } from './catalog-slice-write'
 import {
 	checkRowCounts,
 	checkNoOrphanVariants,
@@ -48,7 +48,7 @@ import {
 	type CatalogImportInput,
 	type CatalogImportResult
 } from './catalog-importer'
-import { runScopedReferenceBootstrap, extractReferencedBrandCategorySlice } from './scoped-reference-bootstrap'
+import { runScopedReferenceBootstrap, extractReferencedBrandCategorySlice, type ScopedReferenceBootstrapResult } from './scoped-reference-bootstrap'
 import { createDatabaseBackup, BackupFailedError, type BackupResult, type CreateDatabaseBackupOptions } from './catalog-migration-backup'
 
 export type WorkflowSelection =
@@ -481,10 +481,11 @@ export type WorkflowWriteInputs = WorkflowInputs & {
 	backupOptions?: CreateDatabaseBackupOptions
 }
 
+export type WorkflowWriteRun = { importResult: CatalogImportResult; checks: SliceWriteChecks; bootstrap: ScopedReferenceBootstrapResult }
 export type WorkflowWriteResult = {
 	backup: BackupResult
-	firstRun: { importResult: CatalogImportResult; checks: SliceWriteChecks }
-	secondRun: { importResult: CatalogImportResult; checks: SliceWriteChecks }
+	firstRun: WorkflowWriteRun
+	secondRun: WorkflowWriteRun
 	idempotent: boolean
 }
 
@@ -498,10 +499,22 @@ export class WorkflowWriteRefusedError extends Error {}
  * `assertSliceConfirmed`, Sprint 12B.6 - not a second confirmation
  * mechanism) AND a safe target (`assertSafeImportTarget`, reused). Creates
  * and validates a `pg_dump` backup BEFORE writing (Requirement 6); refuses
- * to proceed if the backup fails. After a successful atomic write
- * (`runAtomicSliceWrite`, reused unchanged - write + all six checks in one
- * transaction, rolled back atomically if any check fails), re-runs the
- * identical import a second time to prove idempotency (Requirement 7).
+ * to proceed if the backup fails. After the backup, runs
+ * `runAtomicSliceWriteWithBootstrap` (Sprint 12B.10.2) - scoped brand/
+ * category reference bootstrap, THEN product/variant import, THEN all six
+ * post-import checks, all composed into ONE transaction, rolled back
+ * atomically if any check (or the import itself) fails. This ordering fix
+ * closes a real gap: a brand-new target database (no existing brands/
+ * categories - exactly the state the user's confirmed real Pupa read-only
+ * run reported, 1 brand + 20 categories needing bootstrap) previously went
+ * straight to product import with no reference rows for
+ * `resolveBrandId`/`writeCategoryLinksPreview` to find, leaving products
+ * `unpublishedForMissingBrand`/`unpublishedForMissingCategory` exactly as
+ * Sprint 12B.7 already found and fixed for the separate manual CLI flow.
+ * Re-runs the identical write a second time to prove idempotency
+ * (Requirement 7) - bootstrap is additive and idempotent by construction
+ * (Sprint 12B.7), so the second pass resolves it to all-'updated', never a
+ * second 'created'.
  */
 export async function runWorkflowWrite(db: Database, inputs: WorkflowWriteInputs): Promise<WorkflowWriteResult> {
 	assertSafeImportTarget(inputs.databaseUrl)
@@ -557,10 +570,14 @@ export async function runWorkflowWrite(db: Database, inputs: WorkflowWriteInputs
 		idNomDuplicates
 	}
 
-	// Requirement 7: real write + the six post-import checks, atomically.
-	let firstRun: { importResult: CatalogImportResult; checks: SliceWriteChecks }
+	// Sprint 12B.10.2 fix: scoped brand/category reference bootstrap, THEN
+	// product/variant import, THEN the six post-import checks - all inside
+	// ONE transaction (`runAtomicSliceWriteWithBootstrap`), so a brand-new
+	// target database with no existing brand/category rows succeeds
+	// end-to-end instead of leaving products with unresolved links.
+	let firstRun: WorkflowWriteRun
 	try {
-		firstRun = await runAtomicSliceWrite(db, importInput)
+		firstRun = await runAtomicSliceWriteWithBootstrap(db, inputs.dump, legacyProductIds, importInput)
 	} catch (error) {
 		if (error instanceof PostImportChecksFailedError) {
 			throw new WorkflowWriteRefusedError(`Write rolled back - one or more post-import checks failed: ${JSON.stringify(error.checks)}`)
@@ -568,11 +585,13 @@ export async function runWorkflowWrite(db: Database, inputs: WorkflowWriteInputs
 		throw error
 	}
 
-	// Requirement 7: idempotency - identical import run a second time against
-	// the now-committed state. A correct repeat run creates 0 new products.
-	let secondRun: { importResult: CatalogImportResult; checks: SliceWriteChecks }
+	// Requirement 7: idempotency - identical bootstrap+import run a second
+	// time against the now-committed state. Bootstrap is additive/idempotent
+	// (Sprint 12B.7) so it resolves to all-'updated'; a correct repeat import
+	// creates 0 new products.
+	let secondRun: WorkflowWriteRun
 	try {
-		secondRun = await runAtomicSliceWrite(db, importInput)
+		secondRun = await runAtomicSliceWriteWithBootstrap(db, inputs.dump, legacyProductIds, importInput)
 	} catch (error) {
 		if (error instanceof PostImportChecksFailedError) {
 			throw new WorkflowWriteRefusedError(`Idempotency re-run's post-import checks failed: ${JSON.stringify(error.checks)}`)

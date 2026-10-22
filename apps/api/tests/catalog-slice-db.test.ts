@@ -21,8 +21,13 @@ import {
 	checkRepeatRunCreatedNothingNew
 } from '../src/import/catalog-slice-post-import-checks'
 import { runInRolledBackTransaction, resetCatalogTestDatabase, IntentionalRollback, UnsafeResetError } from '../src/import/catalog-slice-rollback'
-import { runAtomicSliceWrite, PostImportChecksFailedError } from '../src/import/catalog-slice-write'
+import { runAtomicSliceWrite, runAtomicSliceWriteWithBootstrap, PostImportChecksFailedError } from '../src/import/catalog-slice-write'
 import { collections, collectionProducts } from '../src/db/schema/collections'
+import { brands } from '../src/db/schema/brands'
+import { categories } from '../src/db/schema/categories'
+import { productCategories } from '../src/db/schema/product-categories'
+import { runScopedReferenceBootstrap } from '../src/import/scoped-reference-bootstrap'
+import type { LegacyBrand, LegacyCategory } from '../src/import/parsers/mysql-catalog'
 import { resetDatabase } from './helpers'
 
 /** Sprint 12B.6 Requirement 8: synthetic fixtures only. */
@@ -66,18 +71,40 @@ function makeLegacyProduct(overrides: Partial<LegacyProduct> & { id: number }): 
 	}
 }
 
-function makeDump(products: LegacyProduct[]): LegacyCatalogDump {
+function makeDump(products: LegacyProduct[], referenceData?: { brands?: LegacyBrand[]; categories?: LegacyCategory[] }): LegacyCatalogDump {
 	return {
 		products,
 		productVariables: [],
-		brands: [],
-		categories: [],
+		brands: referenceData?.brands ?? [],
+		categories: referenceData?.categories ?? [],
 		productCategories: [],
 		productImgs: [],
 		productVariableImgs: [],
 		stores: [],
 		storeImgs: [],
 		productsMore: []
+	}
+}
+
+function makeLegacyBrand(overrides: Partial<LegacyBrand> & { id: number }): LegacyBrand {
+	return { guid: null, title: 'Pupa', uri: null, textRu: null, textRo: null, seoTitleRu: null, seoTitleRo: null, isShown: true, sortOrder: null, ...overrides }
+}
+
+function makeLegacyCategory(overrides: Partial<LegacyCategory> & { id: number }): LegacyCategory {
+	return {
+		guid: null,
+		parentId: null,
+		titleRu: 'Category',
+		titleRo: 'Categorie',
+		uriRu: null,
+		uriRo: null,
+		descRu: null,
+		descRo: null,
+		seoTitleRu: null,
+		seoTitleRo: null,
+		isShown: true,
+		sortOrder: null,
+		...overrides
 	}
 }
 
@@ -368,5 +395,114 @@ describe('Sprint 12B.6.1 Task 3: resetCatalogTestDatabase refuses an unsafe rese
 		// Nothing was touched - neither the catalog data nor the out-of-domain row.
 		expect(await db.select().from(products)).toHaveLength(1)
 		expect(await db.select().from(collectionProducts)).toHaveLength(1)
+	})
+})
+
+describe('Sprint 12B.10.2: runAtomicSliceWriteWithBootstrap orders bootstrap before import', () => {
+	test('a genuinely empty target database (no brands, no categories) still succeeds end-to-end - products are created ACTIVE with real brand/category links, not left draft with missing links', async () => {
+		const legacyBrand = makeLegacyBrand({ id: 960, title: 'Pupa' })
+		const legacyCategory = makeLegacyCategory({ id: 960, titleRu: 'Lipstick' })
+		const dump = makeDump(
+			[makeLegacyProduct({ id: 960, guid: '96001', titleRu: 'Bootstrap-first Source', uriRu: 'bootstrap-first-source', brandId: 960, categoryId: 960 })],
+			{ brands: [legacyBrand], categories: [legacyCategory] }
+		)
+		const oneCRaw = [makeOneCRaw({ ID_nom: '96001' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		// Precondition this test actually proves something: brands/categories
+		// are genuinely empty before the write, exactly the state the user's
+		// confirmed real Pupa read-only run reported (1 brand + 20 categories
+		// needing bootstrap for a brand-new target database).
+		expect(await db.select().from(brands)).toHaveLength(0)
+		expect(await db.select().from(categories)).toHaveLength(0)
+
+		const result = await runAtomicSliceWriteWithBootstrap(db, dump, [960], input)
+		expect(result.bootstrap.brandResult.summary.created).toBe(1)
+		expect(result.bootstrap.categoryResult.summary.created).toBe(1)
+		expect(result.importResult.summary.productsCreated).toBe(1)
+		expect(Object.values(result.checks).every(c => c.ok)).toBe(true)
+		expect(result.checks.categoryBrandLinks.missingBrandLinks).toBe(0)
+		expect(result.checks.categoryBrandLinks.missingCategoryLinks).toBe(0)
+
+		// Proven against real committed state, not just the return value: had
+		// bootstrap NOT run first (the pre-fix `runWorkflowWrite`, which went
+		// straight to `runAtomicSliceWrite` with no bootstrap step at all),
+		// `resolveBrandId`/`writeCategoryLinksPreview` would have found zero
+		// `external_entity_mappings` rows for brand/category 960, and this
+		// product would have been written `status: 'draft'` with a null
+		// `brand_id` and zero `product_categories` rows - precisely the gap
+		// Sprint 12B.7 already found and fixed for the separate manual CLI
+		// flow, which the unified workflow's write path had silently
+		// reintroduced by never composing the two steps together.
+		const [written] = await db.select().from(products)
+		expect(written.status).toBe('active')
+		expect(written.brandId).not.toBeNull()
+		const categoryLinks = await db.select().from(productCategories).where(eq(productCategories.productId, written.id))
+		expect(categoryLinks).toHaveLength(1)
+	})
+
+	test('a repeat run (idempotency) resolves bootstrap to all-updated and the import to 0 created / 1 updated', async () => {
+		const legacyBrand = makeLegacyBrand({ id: 961, title: 'Pupa' })
+		const legacyCategory = makeLegacyCategory({ id: 961, titleRu: 'Mascara' })
+		const dump = makeDump(
+			[makeLegacyProduct({ id: 961, guid: '96101', titleRu: 'Repeat Bootstrap Source', uriRu: 'repeat-bootstrap-source', brandId: 961, categoryId: 961 })],
+			{ brands: [legacyBrand], categories: [legacyCategory] }
+		)
+		const oneCRaw = [makeOneCRaw({ ID_nom: '96101' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const first = await runAtomicSliceWriteWithBootstrap(db, dump, [961], input)
+		expect(first.bootstrap.brandResult.summary.created).toBe(1)
+		expect(first.importResult.summary.productsCreated).toBe(1)
+
+		const second = await runAtomicSliceWriteWithBootstrap(db, dump, [961], input)
+		expect(second.bootstrap.brandResult.summary.created).toBe(0)
+		expect(second.bootstrap.brandResult.summary.updated).toBe(1)
+		expect(second.bootstrap.categoryResult.summary.created).toBe(0)
+		expect(second.importResult.summary.productsCreated).toBe(0)
+		expect(second.importResult.summary.productsUpdated).toBe(1)
+		expect(Object.values(second.checks).every(c => c.ok)).toBe(true)
+
+		expect(await db.select().from(brands)).toHaveLength(1)
+		expect(await db.select().from(categories)).toHaveLength(1)
+		expect(await db.select().from(products)).toHaveLength(1)
+	})
+
+	test('a failing post-import check rolls back the bootstrap too, atomically - not just the product import', async () => {
+		const legacyBrand = makeLegacyBrand({ id: 962, title: 'Pupa' })
+		const legacyCategory = makeLegacyCategory({ id: 962, titleRu: 'Nails' })
+		const dump = makeDump(
+			[makeLegacyProduct({ id: 962, guid: '96201', titleRu: 'Rollback Bootstrap Source', uriRu: 'rollback-bootstrap-source', brandId: 962, categoryId: 962 })],
+			{ brands: [legacyBrand], categories: [legacyCategory] }
+		)
+		const oneCRaw = [makeOneCRaw({ ID_nom: '96201' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		// Same deliberate-corruption technique as the existing
+		// runAtomicSliceWrite rollback test above, replicated for the
+		// bootstrap-composed path: bootstrap commits brand/category rows
+		// inside the SAME transaction as the import, so when a post-import
+		// check is forced to fail, the brand/category rows must roll back
+		// too - proving this is one atomic unit, not bootstrap-then-separately-import.
+		await expect(
+			db.transaction(async tx => {
+				const bootstrap = await runScopedReferenceBootstrap(tx, dump, [962], 'write')
+				expect(bootstrap.brandResult.summary.created).toBe(1)
+				const importResult = await runCatalogImport(tx, input, 'write')
+				await tx.delete(externalEntityMappings)
+				throw new PostImportChecksFailedError({
+					rowCounts: { ok: true, issues: [], actual: { products: 1, variants: 1 } },
+					orphanVariants: { ok: false, issues: ['forced failure'] },
+					duplicateSkus: { ok: true, issues: [] },
+					duplicateExternalIdMappings: { ok: true, issues: [] },
+					barcodeIntegrity: { ok: true, issues: [] },
+					categoryBrandLinks: { ok: true, issues: [], missingBrandLinks: 0, missingCategoryLinks: 0 }
+				})
+			})
+		).rejects.toThrow(PostImportChecksFailedError)
+
+		expect(await db.select().from(brands)).toHaveLength(0)
+		expect(await db.select().from(categories)).toHaveLength(0)
+		expect(await db.select().from(products)).toHaveLength(0)
 	})
 })
