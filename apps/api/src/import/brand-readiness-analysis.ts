@@ -59,7 +59,8 @@ export type BrandReadinessReport = {
 	unassignedProductCount: number
 }
 
-type Attribution = { legacyProductId: number; confirmedVariantCount: number; bucket: BrandPassBucket }
+/** Exported for Sprint 12B.9's brand-representative-slice.ts, which needs the same per-legacy-product pass attribution to pick slice candidates - reused as-is, never re-derived. */
+export type Attribution = { legacyProductId: number; confirmedVariantCount: number; bucket: BrandPassBucket }
 
 /**
  * Builds the idNom -> legacyProductId map from every pass's own confirmed
@@ -70,7 +71,8 @@ type Attribution = { legacyProductId: number; confirmedVariantCount: number; buc
  * ID_nom with no confirmed owner anywhere is left unattributed rather than
  * guessed.
  */
-function buildIdNomOwnerMap(
+/** Exported for Sprint 12B.9's brand-representative-slice.ts - same reuse rationale as `Attribution` above. */
+export function buildIdNomOwnerMap(
 	legacyVariantFamilies: LegacyVariantFamilyReconciliationResult,
 	families: FamilyReconciliationResult,
 	positions: ReconciliationResult
@@ -100,7 +102,8 @@ function buildIdNomOwnerMap(
  * legacy product id first; Pass 1 claims whatever Pass 0 didn't; Pass 2
  * (standalone) only ever sees what neither Pass 0 nor Pass 1 claimed).
  */
-function attributeLegacyProducts(
+/** Exported for Sprint 12B.9's brand-representative-slice.ts - same reuse rationale as `Attribution` above. */
+export function attributeLegacyProducts(
 	dump: LegacyCatalogDump,
 	legacyVariantFamilies: LegacyVariantFamilyReconciliationResult,
 	families: FamilyReconciliationResult,
