@@ -6,9 +6,11 @@ const nextConfig: NextConfig = {
     agentFeedback: true,
   },
   images: {
-    // Sprint 11 mock catalog uses deterministic placeholder photography -
-    // no real product assets exist yet (see src/data/mock/products.ts).
-    remotePatterns: [{ protocol: "https", hostname: "picsum.photos" }],
+    // Mock catalog photography and the supplied homepage hero asset.
+    remotePatterns: [
+      { protocol: "https", hostname: "picsum.photos" },
+      { protocol: "https", hostname: "cdn-09.goldappleme.com" },
+    ],
   },
   cacheComponents: true,
   partialPrefetching: true,

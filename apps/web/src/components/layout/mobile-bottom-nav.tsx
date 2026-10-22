@@ -7,6 +7,7 @@ import type { LucideIcon } from 'lucide-react'
 import type { Dictionary } from '@/i18n/get-dictionary'
 import type { Locale } from '@/i18n/config'
 import { cn } from '@/lib/utils'
+import { BrandMark } from './brand-mark'
 
 type MobileBottomNavProps = {
 	locale: Locale
@@ -56,20 +57,11 @@ function MobileBottomNavContent({ locale, dict, pathname }: MobileBottomNavProps
 								active && 'text-[#AE927C]'
 							)}
 						>
-							{Icon ? <Icon className="size-7 stroke-[1.8]" aria-hidden /> : <VizajeMark className="size-11" />}
+							{Icon ? <Icon className="size-7 stroke-[1.8]" aria-hidden /> : <BrandMark className="size-[26px]" />}
 						</Link>
 					)
 				})}
 			</div>
 		</nav>
-	)
-}
-
-function VizajeMark({ className }: { className?: string }) {
-	return (
-		<svg className={className} viewBox="0 0 48 48" fill="none" aria-hidden>
-			<path d="M7 13h34M7 24h34M7 35h34" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-			<path d="M24 7c7 0 7 10 0 17s-7 17 0 17M24 7c-7 0-7 10 0 17s7 17 0 17" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-		</svg>
 	)
 }

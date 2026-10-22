@@ -15,22 +15,25 @@ export default async function HomePage({ params }: PageProps<'/[locale]'>) {
 
 	return (
 		<div className="flex flex-col gap-14 pb-16 sm:gap-20">
-			<section aria-label={dict.nav.catalog} className="flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pt-4 sm:px-6">
-				{home.hero.map(slide => (
+			{home.hero[0] && (
+				<section aria-label={dict.nav.catalog}>
 					<Link
-						key={slide.id}
-						href={slide.href[locale]}
-						className="relative aspect-[4/5] w-[88vw] shrink-0 snap-start overflow-hidden bg-surface-soft sm:w-[60vw] lg:w-[40vw]"
+						href={home.hero[0].href[locale]}
+						aria-label={home.hero[0].title[locale]}
+						className="relative block aspect-[16/9] w-full overflow-hidden bg-surface-soft"
 					>
-						<Image src={slide.imageUrl} alt="" fill sizes="90vw" className="object-cover" priority />
-						<div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent p-5 text-white">
-							<p className="text-xs uppercase tracking-wide opacity-80">{slide.eyebrow[locale]}</p>
-							<h1 className="mt-1 text-xl font-medium">{slide.title[locale]}</h1>
-							<p className="mt-1 text-sm opacity-90">{slide.subtitle[locale]}</p>
-						</div>
+						<Image
+							src={home.hero[0].imageUrl}
+							alt=""
+							fill
+							priority
+							unoptimized
+							sizes="100vw"
+							className="object-cover"
+						/>
 					</Link>
-				))}
-			</section>
+				</section>
+			)}
 
 			<Section title={dict.home.featuredCategories}>
 				<div className="grid grid-cols-2 gap-3 px-4 sm:grid-cols-4 sm:px-6">

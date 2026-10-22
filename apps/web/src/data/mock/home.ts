@@ -16,7 +16,7 @@ export const heroSlides = [
 			ru: 'Парфюмерия, макияж и уход — тщательно отобранные бренды.',
 			ro: 'Parfumerie, machiaj și îngrijire — branduri atent selectate.'
 		},
-		imageUrl: 'https://picsum.photos/seed/hero-1/1200/1500',
+		imageUrl: 'https://cdn-09.goldappleme.com/qap/mpb/366164363333376635653334386135383931396363316534/web/5f6d61696e5061676542616e6e65728df2df37ca423e1fullhd.webp',
 		href: { ru: '/ru/catalog', ro: '/ro/catalog' }
 	},
 	{
