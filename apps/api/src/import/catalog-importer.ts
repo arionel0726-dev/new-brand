@@ -328,9 +328,14 @@ function isRealSlugCandidate(uri: string | null): uri is string {
  * never-pretty placeholder `legacy-<externalId>` so it is unmistakably a
  * V2-generated stand-in awaiting real SEO review, not a real curated slug.
  */
-function canonicalSlugFor(mainPosition: LegacyProduct, externalId: string): { slug: string; isGenerated: boolean } {
+export function canonicalSlugFor(mainPosition: LegacyProduct, externalId: string): { slug: string; isGenerated: boolean } {
 	if (isRealSlugCandidate(mainPosition.uriRu)) return { slug: mainPosition.uriRu.trim().toLowerCase(), isGenerated: false }
-	return { slug: `legacy-${externalId}`, isGenerated: true }
+	// `externalId` is already "legacy-variant-family-<id>" for a Pass 0
+	// reconstructed family (see importLegacyVariantFamily) - prefixing
+	// "legacy-" again produced the double "legacy-legacy-variant-family-<id>"
+	// slug reported from the real Mac dry-run. Only add the marker once.
+	const fallbackBase = externalId.startsWith('legacy-') ? externalId : `legacy-${externalId}`
+	return { slug: fallbackBase, isGenerated: true }
 }
 
 /**

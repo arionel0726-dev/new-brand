@@ -344,6 +344,25 @@ describe('catalog-importer: legacy_variant_family write path (Sprint 12B.5 Pass 
 		expect(productRows).toHaveLength(1)
 	})
 
+	test('Sprint 12B.8: a Pass 0 family with no real uriRu gets a single-prefixed fallback slug, never "legacy-legacy-variant-family-<id>"', async () => {
+		const parent = makeLegacyProduct({ id: 803, titleRu: 'No Real Slug Family' })
+		const variables = [
+			makeVariable({ id: 10201, productId: 803, sku: '803101', colorRu: 'Red', barcode: 'bc-803-a' }),
+			makeVariable({ id: 10202, productId: 803, sku: '803102', colorRu: 'Blue', barcode: 'bc-803-b' })
+		]
+		const dump = makeDump({ products: [parent], productVariables: variables })
+		const oneCRaw = [makeOneCRaw({ ID_nom: '803101' }), makeOneCRaw({ ID_nom: '803102' })]
+		const input = await buildInput(dump, oneCRaw)
+
+		const result = await db.transaction(async tx => runCatalogImport(tx, input, 'write'))
+		const unit = result.units.find(u => u.kind === 'legacy_variant_family')!
+		expect(unit.action).toBe('created')
+
+		const [productRow] = await db.select().from(products).where(eq(products.id, unit.productId!))
+		expect(productRow.slug).toBe('legacy-variant-family-803')
+		expect(productRow.slug).not.toContain('legacy-legacy-')
+	})
+
 	test('existing external mapping conflict: a pre-existing 1c/nomenclature mapping pointing at a DIFFERENT internal variant excludes just that member, the rest of the family still imports (reuses the Sprint 12B.4 Priority 3 conflict check)', async () => {
 		const parent = makeLegacyProduct({ id: 802 })
 		const variables = [makeVariable({ id: 10101, productId: 802, sku: '802101' }), makeVariable({ id: 10102, productId: 802, sku: '802102' })]
